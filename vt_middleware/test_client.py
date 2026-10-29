@@ -32,6 +32,8 @@ async def read_commands(ws):
 async def main():
     async with websockets.connect(URI) as ws:
         print(f"Connected to {URI}.")
+        # The bridge sends nothing until a client picks a mode; start live, like Unity
+        await ws.send(json.dumps({"command": "use_latest"}))
         listener = asyncio.create_task(listen(ws))
         reader = asyncio.create_task(read_commands(ws))
         # Stop when either side ends (e.g. the server closes the connection)

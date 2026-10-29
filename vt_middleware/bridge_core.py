@@ -2,19 +2,28 @@
 
 Each bridge streams one data source (robot telemetry, IMUs, ...) to Unity on
 its own port. Everything that doesn't depend on the source lives here:
-session tracking, live vs. replay mode, interrupting a running mode when a
-client sends a command, and broadcasting to clients. The source-specific
-parts (which table, how far the live stream has got, what a message looks
-like) are a DataSource subclass - see postgres_bridge.py and imu_bridge.py.
+session tracking, live vs. replay mode per viewer, and sending to clients.
+The source-specific parts (which table, how far the live stream has got,
+what a message looks like) are a DataSource subclass - see
+postgres_bridge.py and imu_bridge.py.
+
+Every connected client (a "viewer") picks its own mode, and gets nothing
+until it does: use_latest goes live, select_session replays. Live viewers all
+follow the newest session, so they share one live feed and one DB poll.
+A viewer that selects a session gets its own replay, which no other viewer sees.
 """
 import asyncio
+import contextlib
+import itertools
 import json
 import os
+import signal
 from pathlib import Path
 
 import asyncpg
 import websockets
 from dotenv import load_dotenv
+from websockets.asyncio.server import serve as websocket_serve
 
 # Explicit path: load_dotenv() with no arguments searches from the current
 # working directory when run under a debugger, and can miss this file
@@ -23,9 +32,11 @@ load_dotenv(Path(__file__).with_name(".env"))
 POLL_INTERVAL_SECONDS = 0.05    # How often to check for new rows
 SESSION_CHECK_INTERVAL_SECONDS = 2.0 # How often to check for a new session
 ERROR_RETRY_SECONDS = 1.0       # back-off after a failed loop iteration (e.g. DB hiccup)
-DB_POOL_MIN_SIZE = 2            # each bridge's supervisor + session watcher query concurrently
-DB_POOL_MAX_SIZE = 10           # headroom for several bridges + client commands arriving mid-query
+DB_POOL_MIN_SIZE = 2            # each bridge's live feed + session watcher query concurrently
+DB_POOL_MAX_SIZE = 10           # headroom for several bridges + viewers' replay fetches
 WEBSOCKET_HOST = "0.0.0.0"
+SHUTDOWN_TIMEOUT_SECONDS = 5.0  # how long to wait for clients to acknowledge the close on Ctrl+C
+SHUTDOWN_CLOSE_REASON = "bridge was shut down"  # sent to clients with the close; Unity displays it
 
 # Sessions are registered here by the dashboard's "Start Session" button,
 # before the robot is enabled - so a new session is visible well before its
@@ -74,6 +85,42 @@ class DataSource:
         raise NotImplementedError
 
 
+class Viewer:
+    """One connected client, and the mode it has chosen.
+
+    live=True: on the shared live feed (newest session). live=False with a
+    session_id: replaying it on its own, via `replay_task`. live=False with no
+    session_id: just connected, nothing chosen yet.
+    """
+    _ids = itertools.count(1)
+
+    def __init__(self, websocket):
+        self.websocket = websocket
+        self.id = next(Viewer._ids)     # only for log messages
+        self.live = False
+        self.session_id = None
+        self.replay_task = None
+
+    async def send(self, payload: dict):
+        await self.websocket.send(json.dumps(payload))
+
+    async def send_session_changed(self):
+        await self.send({
+            "type": "session_changed",
+            "sessionId": self.session_id,
+            "autoFollow": self.live,
+        })
+
+    async def stop_replay(self):
+        """Cancels a running replay and waits for it to finish, so none of
+        its messages can arrive after whatever is sent next."""
+        task, self.replay_task = self.replay_task, None
+        if task is not None and not task.done():
+            task.cancel()
+            with contextlib.suppress(asyncio.CancelledError):
+                await task
+
+
 class Bridge:
     """One data source served on one WebSocket port."""
 
@@ -81,43 +128,49 @@ class Bridge:
         self.source = source
         self.port = port
         self.pool = None
-        self.clients = set()
+        self.viewers = set()
 
-        self.current_session = None
+        # Shared live feed: the newest session, and how far it has been sent
+        self.live_session = None
         self.cursor = source.initial_cursor()
-        self.auto_follow = True     # False if client manually picks a session
-        # Bumped on every session/mode change; a running live or replay loop
-        # exits as soon as it sees the value it started with is stale
-        self.generation = 0
+        # Held while the feed sends a batch, and while anything changes the live
+        # session, the cursor or a viewer's mode. Keeps a viewer that leaves
+        # live mode from receiving one more live batch after its new
+        # session_changed, and keeps the cursor consistent with the session.
+        self.live_lock = asyncio.Lock()
 
     def log(self, message):
         print(f"[{self.source.name}] {message}")
 
-    def switch_session(self, session_id, auto: bool):
-        self.current_session = session_id
-        self.cursor = self.source.initial_cursor()   # stream from the session's first row
-        self.auto_follow = auto
-        mode = "auto-detected" if auto else "manually selected"
-        self.log(f"Switching to session {session_id} ({mode}).")
+    def live_viewers(self):
+        return [v for v in self.viewers if v.live]
 
     # --- Clients ---
 
     async def handle_client(self, websocket):
-        # Keep track of connected Unity clients so the poll loop can broadcast to them
-        self.clients.add(websocket)
-        self.log(f"Client connected. Total clients: {len(self.clients)}")
+        viewer = Viewer(websocket)
+        self.viewers.add(viewer)
+        self.log(f"Viewer {viewer.id} connected. Total viewers: {len(self.viewers)}")
         try:
+            # A new viewer gets nothing until it sends use_latest or
+            # select_session. Unity sends one right after connecting; after a
+            # reconnect mid-replay it sends neither, so its local replay keeps playing.
             async for raw_message in websocket:
                 # A bad message shouldn't drop this client's connection
                 try:
-                    await self.handle_client_message(raw_message)
+                    await self.handle_client_message(viewer, raw_message)
+                except websockets.ConnectionClosed:
+                    raise
                 except Exception as e:
-                    self.log(f"Error handling client message {raw_message!r}: {type(e).__name__}: {e}")
+                    self.log(f"Error handling viewer {viewer.id} message {raw_message!r}: {type(e).__name__}: {e}")
+        except websockets.ConnectionClosed:
+            pass    # closed while we were replying; the finally below cleans up
         finally:
-            self.clients.discard(websocket)
-            self.log(f"Client disconnected. Total clients: {len(self.clients)}")
+            await viewer.stop_replay()
+            self.viewers.discard(viewer)
+            self.log(f"Viewer {viewer.id} disconnected. Total viewers: {len(self.viewers)}")
 
-    async def handle_client_message(self, raw_message: str):
+    async def handle_client_message(self, viewer: Viewer, raw_message: str):
         try:
             message = json.loads(raw_message)
         except json.JSONDecodeError:
@@ -137,198 +190,222 @@ class Bridge:
             except (TypeError, ValueError):
                 self.log(f"select_session needs an integer 'sessionId', got {message.get('sessionId')!r}; ignoring.")
                 return
-            self.switch_session(session_id, auto=False)
-            self.generation += 1 # stops the live segment or any previous replay segment
-            await self.broadcast_session_changed()
+            await self.start_replay(viewer, session_id)
 
         elif command == "use_latest":
-            self.log("Client requested auto-follow mode.")
-            await self.switch_to_latest()
+            self.log(f"Viewer {viewer.id} requested live mode.")
+            await viewer.stop_replay()
+            await self.join_live(viewer)
 
         else:
             self.log(f"Ignoring unknown command: {command!r}")
 
-    async def switch_to_latest(self):
-        """Enters live (auto-follow) mode on the newest session, starting from
-        its newest row. Shared by the use_latest command and the replay
-        fallback for empty sessions."""
-        self.auto_follow = True
-        self.generation += 1 # stops any currently-running replay segment
-        latest = await get_latest_session_id(self.pool)
-        if latest is not None:
-            if latest != self.current_session:
-                self.switch_session(latest, auto=True)
-            # Jump to "now" rather than resuming from wherever replay left off
-            self.cursor = await self.source.latest_cursor(self.pool, latest)
-        await self.broadcast_session_changed()
+    # --- Live mode (shared) ---
 
-    async def broadcast(self, payload: dict):
-        if not self.clients:
-            return
-        message = json.dumps(payload)
-        # Send to all connected clients concurrently; drop any that fail
-        clients = list(self.clients)
-        results = await asyncio.gather(
-            *(client.send(message) for client in clients),
-            return_exceptions=True,
-        )
-        for client, result in zip(clients, results):
-            if isinstance(result, Exception):
-                self.clients.discard(client)
+    def set_live_session(self, session_id):
+        """Caller holds live_lock. Streams the new session from its first row:
+        a session found by the watcher is at most one check interval old, so
+        any rows it already has are the start of the motion, not stale history."""
+        self.live_session = session_id
+        self.cursor = self.source.initial_cursor()
+        self.log(f"Live feed now on session {session_id}.")
 
-    async def broadcast_session_changed(self):
-        await self.broadcast({
-            "type": "session_changed",
-            "sessionId": self.current_session,
-            "autoFollow": self.auto_follow
-        })
+    async def notify_live_viewers(self):
+        """Caller holds live_lock. Tells every live viewer the live session changed."""
+        viewers = self.live_viewers()
+        for viewer in viewers:
+            viewer.session_id = self.live_session
+        await asyncio.gather(*(v.send_session_changed() for v in viewers), return_exceptions=True)
 
-    async def send_rows(self, session_id, rows, my_generation, advance_cursor: bool):
-        """Broadcasts rows in source-sized chunks. Returns False if a newer
-        command or session switch interrupted part-way through."""
-        size = self.source.rows_per_message
-        for start in range(0, len(rows), size):
-            if self.generation != my_generation:
-                return False
-            chunk = rows[start:start + size]
-            await self.broadcast(self.source.to_message(session_id, chunk))
-            # Re-check after the await: a switch during the broadcast has
-            # already reset the cursor, and these rows belong to the old session
-            if advance_cursor and self.generation == my_generation:
-                self.cursor = self.source.advance(self.cursor, chunk[-1])
-        return True
-
-    # --- Background loops ---
+    async def join_live(self, viewer: Viewer):
+        """Puts a viewer on the shared live feed (used by use_latest, and when
+        a selected session turns out to be empty)."""
+        async with self.live_lock:
+            latest = await get_latest_session_id(self.pool)
+            if latest is not None and latest != self.live_session:
+                self.set_live_session(latest)
+                await self.notify_live_viewers()
+            # The feed doesn't poll while nobody is live, so its cursor may be
+            # far behind. The first viewer to join starts it at "now".
+            if not self.live_viewers() and self.live_session is not None:
+                self.cursor = await self.source.latest_cursor(self.pool, self.live_session)
+            viewer.live = True
+            viewer.session_id = self.live_session
+            # No session exists yet: the watcher tells this viewer when one appears
+            if self.live_session is not None:
+                await viewer.send_session_changed()
 
     async def session_watcher(self):
-        """Runs continuously. Only acts while auto_follow is enabled."""
+        """Moves the live feed to each newly registered session."""
         while True:
             await asyncio.sleep(SESSION_CHECK_INTERVAL_SECONDS)
-            if not self.auto_follow:
-                continue
             try:
                 latest = await get_latest_session_id(self.pool)
-                if latest is not None and latest != self.current_session:
-                    # switch_session resets the cursor, so the live segment
-                    # streams this session from its very first row. A session
-                    # found here is at most one check interval old, so any rows
-                    # that already exist are the start of the motion, not stale history.
-                    self.switch_session(latest, auto=True)
-                    # Restart the live segment so rows already fetched for the
-                    # old session can't be sent under, or move the cursor of, the new one
-                    self.generation += 1
-                    await self.broadcast_session_changed()
+                if latest is None or latest == self.live_session:
+                    continue
+                async with self.live_lock:
+                    if latest != self.live_session:  # a viewer joining may have switched already
+                        self.set_live_session(latest)
+                        await self.notify_live_viewers()
             except Exception as e:
                 # Skip this check; the next one runs after the normal interval
                 self.log(f"Session watcher error: {type(e).__name__}: {e}")
 
-    async def run_live_segment(self, my_generation):
-        while self.generation == my_generation:
-            session_id = self.current_session
-            if session_id is not None:
-                rows = await self.source.fetch_new(self.pool, session_id, self.cursor)
-                if not await self.send_rows(session_id, rows, my_generation, advance_cursor=True):
-                    return
-            await asyncio.sleep(POLL_INTERVAL_SECONDS)
-
-    async def run_replay_segment(self, my_generation):
-        """Fetches the whole selected session once and broadcasts it as a single
-        burst - no pacing, no looping. Unity owns replay pacing/looping, the
-        same way CsvPlaybackAdapter paces a loaded CSV. After the burst, idles
-        (cheaply) until a new command changes the generation - it must NOT just
-        return here, since the supervisor would immediately call this again
-        with nothing having changed, causing an infinite re-fetch loop."""
-        session_id = self.current_session
-        if session_id is None:
-            await asyncio.sleep(POLL_INTERVAL_SECONDS)
-            return
-
-        rows = await self.source.fetch_session(self.pool, session_id)
-        if self.generation != my_generation:
-            return # a newer command arrived during the fetch; let it win
-
-        if not rows:
-            self.log(f"Session {session_id} has no rows to send. Falling back to live mode.")
-            await self.broadcast({
-                "type": "session_empty",
-                "sessionId": session_id,
-            })
-            # Bumps the generation, so the supervisor moves on to the live segment
-            await self.switch_to_latest()
-            return
-
-        self.log(f"Sending session {session_id} to client(s) for local "
-                 f"replay: {len(rows)} rows.")
-
-        # The cursor only matters in live mode, and every route back to live
-        # resets it, so replay doesn't advance it
-        if not await self.send_rows(session_id, rows, my_generation, advance_cursor=False):
-            return
-
-        # Explicit end-of-burst marker, so the client knows when it's safe to
-        # start replaying rather than guessing via a timeout
-        await self.broadcast({
-            "type": "replay_complete",
-            "sessionId": session_id,
-            "frameCount": len(rows),
-        })
-
-        # Whole session sent. Idle until interrupted by a new command - do not
-        # return normally, or the supervisor will immediately re-fetch and
-        # re-broadcast the same burst again.
-        while self.generation == my_generation:
-            await asyncio.sleep(POLL_INTERVAL_SECONDS)
-
-    async def supervisor(self):
+    async def live_feed(self):
+        """Polls the live session and sends new rows to every live viewer.
+        One poll serves all of them; it idles while no viewer is live."""
+        size = self.source.rows_per_message
         while True:
-            my_generation = self.generation
+            await asyncio.sleep(POLL_INTERVAL_SECONDS)
             try:
-                if self.auto_follow:
-                    await self.run_live_segment(my_generation)
-                else:
-                    await self.run_replay_segment(my_generation)
+                async with self.live_lock:
+                    viewers = self.live_viewers()
+                    if not viewers or self.live_session is None:
+                        continue
+                    rows = await self.source.fetch_new(self.pool, self.live_session, self.cursor)
+                    for start in range(0, len(rows), size):
+                        chunk = rows[start:start + size]
+                        message = json.dumps(self.source.to_message(self.live_session, chunk))
+                        # A viewer whose connection failed is removed by its own handler
+                        await asyncio.gather(*(v.websocket.send(message) for v in viewers),
+                                             return_exceptions=True)
+                        self.cursor = self.source.advance(self.cursor, chunk[-1])
             except Exception as e:
                 # Log and retry rather than letting one failure take down the bridge
-                self.log(f"Supervisor error: {type(e).__name__}: {e}. Retrying in {ERROR_RETRY_SECONDS}s.")
+                self.log(f"Live feed error: {type(e).__name__}: {e}. Retrying in {ERROR_RETRY_SECONDS}s.")
                 await asyncio.sleep(ERROR_RETRY_SECONDS)
 
-    async def run(self, pool):
+    # --- Replay mode (per viewer) ---
+
+    async def start_replay(self, viewer: Viewer, session_id):
+        await viewer.stop_replay()
+        async with self.live_lock:
+            viewer.live = False
+            viewer.session_id = session_id
+            self.log(f"Viewer {viewer.id} selected session {session_id}.")
+            await viewer.send_session_changed()
+        viewer.replay_task = asyncio.create_task(self.replay(viewer, session_id))
+
+    async def replay(self, viewer: Viewer, session_id):
+        """Sends the whole selected session to this viewer as one burst - no
+        pacing, no looping. Unity owns replay pacing/looping, the same way
+        CsvPlaybackAdapter paces a loaded CSV. Cancelled by the viewer's next
+        command or by its disconnect."""
+        try:
+            while True:
+                try:
+                    rows = await self.source.fetch_session(self.pool, session_id)
+                    break
+                except Exception as e:
+                    self.log(f"Replay fetch error for session {session_id}: {type(e).__name__}: {e}. "
+                             f"Retrying in {ERROR_RETRY_SECONDS}s.")
+                    await asyncio.sleep(ERROR_RETRY_SECONDS)
+
+            if not rows:
+                self.log(f"Session {session_id} has no rows to send. Viewer {viewer.id} falls back to live mode.")
+                await viewer.send({"type": "session_empty", "sessionId": session_id})
+                await self.join_live(viewer)
+                return
+
+            self.log(f"Sending session {session_id} to viewer {viewer.id} for local replay: {len(rows)} rows.")
+            size = self.source.rows_per_message
+            for start in range(0, len(rows), size):
+                await viewer.send(self.source.to_message(session_id, rows[start:start + size]))
+
+            # Explicit end-of-burst marker, so the client knows when it's safe to
+            # start replaying rather than guessing via a timeout
+            await viewer.send({
+                "type": "replay_complete",
+                "sessionId": session_id,
+                "frameCount": len(rows),
+            })
+        except websockets.ConnectionClosed:
+            pass    # viewer left mid-burst; its handler cleans up
+
+    # --- Lifecycle ---
+
+    async def run(self, pool, stop: asyncio.Event):
+        """Serves until `stop` is set, then closes every client connection."""
         self.pool = pool
-
-        # Listen before the startup queries, so a client that connects while
-        # they run isn't refused (they can take a while on a cold database)
-        async with websockets.serve(self.handle_client, WEBSOCKET_HOST, self.port):
+        async with websocket_serve(self.handle_client, WEBSOCKET_HOST, self.port,
+                                   close_timeout=SHUTDOWN_TIMEOUT_SECONDS) as server:
             self.log(f"WebSocket server listening on ws://{WEBSOCKET_HOST}:{self.port}")
-
-            latest = await get_latest_session_id(pool)
-            cursor = None if latest is None else await self.source.latest_cursor(pool, latest)
-            # A client command during the queries bumps the generation and has
-            # already chosen the session; don't overwrite it
-            if self.generation == 0:
+            # Listening already, so a client that connects during the startup
+            # query isn't refused; join_live waits for the lock held here
+            async with self.live_lock:
+                latest = await get_latest_session_id(pool)
                 if latest is None:
                     self.log("No sessions found yet. Waiting...")
-                else:
-                    self.current_session, self.cursor = latest, cursor
-                    self.log(f"Starting on session {latest} (auto-detected, live), from cursor {cursor}.")
+                elif latest != self.live_session:
+                    self.set_live_session(latest)
 
-            await asyncio.gather(
-                self.session_watcher(),
-                self.supervisor(),
-            )
+            tasks = [asyncio.create_task(self.session_watcher()),
+                     asyncio.create_task(self.live_feed())]
+            await stop.wait()
+
+            for task in tasks:
+                task.cancel()
+            await asyncio.gather(*tasks, return_exceptions=True)
+            # Close each viewer with "going away" (1001) and a reason Unity shows
+            # in its status box. Waits up to close_timeout for each to answer.
+            await asyncio.gather(*(v.websocket.close(1001, SHUTDOWN_CLOSE_REASON)
+                                   for v in list(self.viewers)), return_exceptions=True)
+            # Stops listening, then waits for the handlers, which cancel their
+            # viewers' replays, to finish
+            server.close()
+            await server.wait_closed()
+            self.log("Stopped.")
+
+
+def install_stop_handlers(stop: asyncio.Event):
+    """Ctrl+C (SIGINT) or `docker stop` (SIGTERM) asks for a clean shutdown.
+    A second Ctrl+C exits immediately, in case shutdown hangs."""
+    loop = asyncio.get_running_loop()
+
+    def on_signal(signame):
+        if stop.is_set():
+            print(f"{signame} again: exiting without waiting.", flush=True)
+            os._exit(1)
+        print(f"{signame} received: shutting down (press Ctrl+C again to force).")
+        stop.set()
+
+    for sig in (signal.SIGINT, signal.SIGTERM):
+        loop.add_signal_handler(sig, on_signal, sig.name)
 
 
 async def serve(*bridges: Bridge):
-    """Runs one or more bridges in this process, sharing one connection pool."""
+    """Runs one or more bridges in this process, sharing one connection pool,
+    until Ctrl+C or SIGTERM."""
     dsn = os.environ.get("DB_DSN")
     if not dsn:
         # Without this check asyncpg silently falls back to localhost:5432,
         # which fails with a confusing "connection refused"
         raise SystemExit(f"DB_DSN is not set. Put it in {Path(__file__).with_name('.env')}.")
 
-    # A pool rather than a single connection: the supervisor, session watcher
-    # and client command handler all query concurrently, and one asyncpg
+    stop = asyncio.Event()
+    install_stop_handlers(stop)
+
+    # A pool rather than a single connection: the live feed, session watcher
+    # and viewers' replays all query concurrently, and one asyncpg
     # connection can only run one query at a time. pool.fetch()/fetchval()
     # each borrow a free connection for the duration of the query.
-    async with asyncpg.create_pool(dsn, min_size=DB_POOL_MIN_SIZE, max_size=DB_POOL_MAX_SIZE) as pool:
+    async def connect():
+        return await asyncpg.create_pool(dsn, min_size=DB_POOL_MIN_SIZE, max_size=DB_POOL_MAX_SIZE)
+
+    # Race the connection against Ctrl+C: with the NAS unreachable, connecting
+    # can take a minute to time out, and Ctrl+C should stop it straight away
+    connecting = asyncio.create_task(connect())
+    stopping = asyncio.create_task(stop.wait())
+    await asyncio.wait({connecting, stopping}, return_when=asyncio.FIRST_COMPLETED)
+    stopping.cancel()
+    if not connecting.done():
+        connecting.cancel()
+        with contextlib.suppress(asyncio.CancelledError):
+            await connecting
+        print("Stopped before connecting to Postgres.")
+        return
+
+    async with connecting.result() as pool:
         print("Connected to Postgres.")
-        await asyncio.gather(*(bridge.run(pool) for bridge in bridges))
+        await asyncio.gather(*(bridge.run(pool, stop) for bridge in bridges))
+    print("Bridges stopped.")

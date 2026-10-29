@@ -1,6 +1,9 @@
 """Runs every bridge in one process (robot on 8765, IMU on 8766), sharing one
 database connection pool. Each bridge can still be run on its own with
-`python postgres_bridge.py` or `python imu_bridge.py`."""
+`python postgres_bridge.py` or `python imu_bridge.py`.
+
+Ctrl+C (or SIGTERM, e.g. `docker stop`) stops both bridges cleanly; serve()
+in bridge_core.py handles it. Press Ctrl+C twice to exit without waiting."""
 import asyncio
 
 import imu_bridge

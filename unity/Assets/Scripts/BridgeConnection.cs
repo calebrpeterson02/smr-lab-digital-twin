@@ -25,9 +25,11 @@ public abstract class BridgeConnection : MonoBehaviour
     [Tooltip("Give up on a connection attempt after this many seconds (an unreachable host can otherwise hang for a long time).")]
     public float connectTimeoutSeconds = 5f;
 
+    [Tooltip("While the bridge is unreachable (not started yet, or stopped), try to reconnect this often.")]
+    public float reconnectIntervalSeconds = 3f;
+
     [Header("Session selection (Inspector for now)")]
-    [Tooltip("If >= 0, sends select_session for this id on connect. If -1, stays on " +
-             "whatever the bridge is already doing (live, by default).")]
+    [Tooltip("If >= 0, replays this session on the first connect. If -1, starts live.")]
     public int sessionIdOverride = -1;
 
     [Header("Playback")]
@@ -120,7 +122,8 @@ public abstract class BridgeConnection : MonoBehaviour
         public int frameCount;
     }
 
-    public enum StatusLevel { Info, Warning, Error }
+    // Success: something that was failing works now (e.g. connected to the bridge)
+    public enum StatusLevel { Info, Warning, Error, Success }
 
     /// <summary>
     /// Raised on the main thread whenever there's something worth showing the
@@ -140,6 +143,9 @@ public abstract class BridgeConnection : MonoBehaviour
     private ClientWebSocket socket;
     private CancellationTokenSource cts;
     private Task<bool> connectTask; // latest connection attempt; shared by callers while it's still running
+    private bool firstConnection = true;
+    private bool retryingQuietly;   // a failure was reported; later retries stay silent until one succeeds
+    private int currentSessionId = -1;  // from the last session_changed; re-requested if its replay was cut off
     private readonly ConcurrentQueue<string> incoming = new ConcurrentQueue<string>();
     // ClientWebSocket allows only one SendAsync in flight at a time
     private readonly SemaphoreSlim sendLock = new SemaphoreSlim(1, 1);
@@ -155,15 +161,33 @@ public abstract class BridgeConnection : MonoBehaviour
         }
     }
 
-    protected virtual async void Start()
+    protected virtual void Start()
     {
         cts = new CancellationTokenSource();
+        _ = ConnectionLoop();
+    }
 
-        if (!await EnsureConnectedAsync()) return;
-
-        if (sessionIdOverride >= 0)
+    /// <summary>
+    /// Keeps the connection up: connects at startup, and reconnects every
+    /// reconnectIntervalSeconds whenever the bridge isn't reachable - not
+    /// started yet, or stopped and started again. Runs until OnDestroy.
+    /// </summary>
+    private async Task ConnectionLoop()
+    {
+        while (!cts.IsCancellationRequested)
         {
-            await SelectSession(sessionIdOverride);
+            if (socket == null || socket.State != WebSocketState.Open)
+            {
+                await EnsureConnectedAsync();
+            }
+            try
+            {
+                await Task.Delay(TimeSpan.FromSeconds(Mathf.Max(reconnectIntervalSeconds, 0.5f)), cts.Token);
+            }
+            catch (OperationCanceledException)
+            {
+                return; // shutting down
+            }
         }
     }
 
@@ -191,16 +215,18 @@ public abstract class BridgeConnection : MonoBehaviour
             using var timeout = CancellationTokenSource.CreateLinkedTokenSource(cts.Token);
             timeout.CancelAfter(TimeSpan.FromSeconds(connectTimeoutSeconds));
 
-            ReportStatus($"Connecting to {serverUrl}...");
+            if (!retryingQuietly) ReportStatus($"Connecting to {serverUrl}...");
             await newSocket.ConnectAsync(new Uri(serverUrl), timeout.Token);
-            ReportStatus($"Connected to {serverUrl}");
+            retryingQuietly = false;
+            ReportStatus($"Connected to the bridge at {serverUrl}", StatusLevel.Success);
 
             _ = ReceiveLoop(newSocket); // fire-and-forget; feeds the queue Update() drains
+            await SendStartupCommand();
             return true;
         }
         catch (OperationCanceledException) when (!cts.IsCancellationRequested)
         {
-            ReportStatus($"Connection to {serverUrl} timed out after {connectTimeoutSeconds}s.", StatusLevel.Error);
+            ReportConnectFailure($"Connection to {serverUrl} timed out after {connectTimeoutSeconds}s.");
             return false;
         }
         catch (OperationCanceledException)
@@ -209,9 +235,36 @@ public abstract class BridgeConnection : MonoBehaviour
         }
         catch (Exception e)
         {
-            ReportStatus($"Connection to {serverUrl} failed: {e.Message}", StatusLevel.Error);
+            ReportConnectFailure($"Connection to {serverUrl} failed: {e.Message}");
             return false;
         }
+    }
+
+    // Only the first failure in a row is shown; ConnectionLoop keeps retrying
+    // quietly until one succeeds, so the status box isn't flooded
+    private void ReportConnectFailure(string message)
+    {
+        if (retryingQuietly) return;
+        retryingQuietly = true;
+        ReportStatus($"{message} Retrying every {reconnectIntervalSeconds:0.#}s.", StatusLevel.Error);
+    }
+
+    /// <summary>
+    /// Tells the bridge what this client wants, right after connecting. The
+    /// bridge keeps a new connection idle until told, so a reconnect can't
+    /// interrupt a replay that is already playing locally.
+    /// </summary>
+    private Task SendStartupCommand()
+    {
+        if (firstConnection)
+        {
+            firstConnection = false;
+            return sessionIdOverride >= 0 ? SelectSession(sessionIdOverride) : UseLatest();
+        }
+        if (IsLive) return UseLatest();
+        // The connection dropped while the replay was still downloading: ask again
+        if (!replayReady && currentSessionId >= 0) return SelectSession(currentSessionId);
+        return Task.CompletedTask;  // the whole replay is here; it keeps playing locally
     }
 
     protected virtual void Update()
@@ -333,7 +386,11 @@ public abstract class BridgeConnection : MonoBehaviour
                 do
                 {
                     result = await socket.ReceiveAsync(new ArraySegment<byte>(buffer), cts.Token);
-                    if (result.MessageType == WebSocketMessageType.Close) return;
+                    if (result.MessageType == WebSocketMessageType.Close)
+                    {
+                        await HandleServerClose(socket, result);
+                        return;
+                    }
                     ms.Write(buffer, 0, result.Count);
                 } while (!result.EndOfMessage);
 
@@ -347,12 +404,43 @@ public abstract class BridgeConnection : MonoBehaviour
         }
         catch (WebSocketException e)
         {
-            // The bridge went away without a close handshake (e.g. Ctrl+C)
-            ReportStatus($"Connection lost: {e.Message}", StatusLevel.Warning);
+            // The bridge went away without a close handshake (e.g. it was killed)
+            ReportStatus($"Connection lost: {e.Message} Reconnecting when it's back.", StatusLevel.Warning);
+            retryingQuietly = true;
         }
         catch (Exception e)
         {
             ReportStatus($"Receive loop error: {e.Message}", StatusLevel.Error);
+        }
+    }
+
+    // The bridge closed the connection (e.g. Ctrl+C in its terminal). Tell the
+    // user why, then answer the close: ClientWebSocket doesn't reply on its own,
+    // and without a reply the bridge waits out its close timeout.
+    private async Task HandleServerClose(ClientWebSocket socket, WebSocketReceiveResult result)
+    {
+        string reason = string.IsNullOrEmpty(result.CloseStatusDescription)
+            ? $"close code {(int?)result.CloseStatus}"
+            : result.CloseStatusDescription;
+        ReportStatus($"Bridge connection terminated ({reason}). Reconnecting when it's back.", StatusLevel.Warning);
+        retryingQuietly = true; // the message above already says so; don't add a failure per retry
+
+        try
+        {
+            using var timeout = new CancellationTokenSource(TimeSpan.FromSeconds(1));
+            await sendLock.WaitAsync(timeout.Token);  // ClientWebSocket allows one send at a time
+            try
+            {
+                await socket.CloseOutputAsync(WebSocketCloseStatus.NormalClosure, "", timeout.Token);
+            }
+            finally
+            {
+                sendLock.Release();
+            }
+        }
+        catch (Exception)
+        {
+            // Best effort: the bridge closes its side anyway once its timeout runs out
         }
     }
 
@@ -381,6 +469,7 @@ public abstract class BridgeConnection : MonoBehaviour
                     // Drop the previous session's data - a burst for a new session is
                     // either starting now, or we've switched to live.
                     ClearItems();
+                    currentSessionId = msg.sessionId;
                     IsLive = msg.autoFollow;
                     if (IsLive) clock.LeaveReplay(this);
                     else clock.JoinReplay(this); // holds the shared replay until this twin's data arrives

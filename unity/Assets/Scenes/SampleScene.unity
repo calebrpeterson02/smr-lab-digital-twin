@@ -2649,6 +2649,7 @@ MonoBehaviour:
   infoColor: {r: 1, g: 1, b: 1, a: 1}
   warningColor: {r: 1, g: 0.85, b: 0.3, a: 1}
   errorColor: {r: 1, g: 0.4, b: 0.4, a: 1}
+  successColor: {r: 0.45, g: 0.9, b: 0.45, a: 1}
   warningHoldSeconds: 3
   pauseButtonLabel: {fileID: 208069448}
   pauseLabel: Pause
@@ -2740,7 +2741,7 @@ MonoBehaviour:
   m_EditorClassIdentifier: Unity.TextMeshPro::TMPro.TextMeshProUGUI
   m_Material: {fileID: 0}
   m_Color: {r: 1, g: 1, b: 1, a: 1}
-  m_RaycastTarget: 1
+  m_RaycastTarget: 0
   m_RaycastPadding: {x: 0, y: 0, z: 0, w: 0}
   m_Maskable: 1
   m_OnCullStateChanged:
@@ -4243,7 +4244,7 @@ MonoBehaviour:
   m_EditorClassIdentifier: Unity.TextMeshPro::TMPro.TextMeshProUGUI
   m_Material: {fileID: 0}
   m_Color: {r: 1, g: 1, b: 1, a: 1}
-  m_RaycastTarget: 1
+  m_RaycastTarget: 0
   m_RaycastPadding: {x: 0, y: 0, z: 0, w: 0}
   m_Maskable: 1
   m_OnCullStateChanged:
@@ -4547,6 +4548,7 @@ MonoBehaviour:
   displayName: 
   serverUrl: ws://localhost:8766
   connectTimeoutSeconds: 5
+  reconnectIntervalSeconds: 3
   sessionIdOverride: -1
   clock: {fileID: 0}
   driver: {fileID: 1860801932}

@@ -20,10 +20,12 @@ public class SessionUIController : MonoBehaviour
     public Color infoColor = Color.white;
     public Color warningColor = new Color(1f, 0.85f, 0.3f);
     public Color errorColor = new Color(1f, 0.4f, 0.4f);
+    public Color successColor = new Color(0.45f, 0.9f, 0.45f);
 
-    [Tooltip("A warning/error stays on screen at least this long before a routine (info) message " +
-             "can replace it. Without this, a warning can flash by unread - e.g. the bridge reports an " +
-             "empty session and immediately switches back to live. Set to 0 for strict 'latest message wins'.")]
+    [Tooltip("A warning/error/success stays on screen at least this long before a routine (info) message " +
+             "can replace it. Without this, it can flash by unread - e.g. the bridge reports an empty " +
+             "session and immediately switches back to live, or 'Connected' is replaced by the live " +
+             "session message a moment later. Set to 0 for strict 'latest message wins'.")]
     public float warningHoldSeconds = 3f;
 
     [Header("Pause button (replay only)")]
@@ -112,6 +114,7 @@ public class SessionUIController : MonoBehaviour
         {
             StatusLevel.Warning => warningColor,
             StatusLevel.Error => errorColor,
+            StatusLevel.Success => successColor,
             _ => infoColor,
         };
     }
