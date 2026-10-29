@@ -1,0 +1,7 @@
+# Keep the graph scoped to the C# scripts; everything else is Unity-generated or third-party.
+Packages/
+ProjectSettings/
+Library/
+Logs/
+UserSettings/
+Assets/TutorialInfo/
