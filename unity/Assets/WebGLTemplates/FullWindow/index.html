@@ -1,0 +1,68 @@
+<!DOCTYPE html>
+<html lang="en-us">
+  <head>
+    <meta charset="utf-8">
+    <meta http-equiv="Content-Type" content="text/html; charset=utf-8">
+    <title>{{{ PRODUCT_NAME }}}</title>
+    <style>
+      /* The canvas fills the whole browser window and follows it when resized.
+         Unity's own templates use a fixed-size canvas (960x600 by default). */
+      html, body { margin: 0; padding: 0; height: 100%; overflow: hidden; background: {{{ BACKGROUND_COLOR }}}; }
+      #unity-canvas { position: fixed; inset: 0; width: 100%; height: 100%; display: block; }
+
+      /* Loading progress, shown until the build has downloaded and started */
+      #loading { position: fixed; inset: 0; display: flex; flex-direction: column; align-items: center;
+                 justify-content: center; gap: 12px; font: 16px sans-serif; color: #ddd; }
+      #loading-bar { width: 320px; height: 8px; background: #444; border-radius: 4px; overflow: hidden; }
+      #loading-fill { width: 0; height: 100%; background: #ddd; }
+
+      /* Bottom left: the twin's own panels use the right-hand corners */
+      #fullscreen-button { position: fixed; left: 12px; bottom: 12px; padding: 6px 10px;
+                           font: 14px sans-serif; color: #fff; background: rgba(0, 0, 0, 0.45);
+                           border: 1px solid rgba(255, 255, 255, 0.4); border-radius: 4px; cursor: pointer; }
+      #fullscreen-button:hover { background: rgba(0, 0, 0, 0.7); }
+    </style>
+  </head>
+  <body>
+    <canvas id="unity-canvas" tabindex="-1"></canvas>
+    <div id="loading">
+      <div id="loading-text">Loading the digital twin...</div>
+      <div id="loading-bar"><div id="loading-fill"></div></div>
+    </div>
+    <button id="fullscreen-button" hidden>Fullscreen</button>
+
+    <script src="Build/{{{ LOADER_FILENAME }}}"></script>
+    <script>
+      const canvas = document.querySelector("#unity-canvas");
+      const loading = document.querySelector("#loading");
+
+      createUnityInstance(canvas, {
+        arguments: [],
+        dataUrl: "Build/{{{ DATA_FILENAME }}}",
+        frameworkUrl: "Build/{{{ FRAMEWORK_FILENAME }}}",
+#if USE_THREADS
+        workerUrl: "Build/{{{ WORKER_FILENAME }}}",
+#endif
+#if USE_WASM
+        codeUrl: "Build/{{{ CODE_FILENAME }}}",
+#endif
+#if SYMBOLS_FILENAME
+        symbolsUrl: "Build/{{{ SYMBOLS_FILENAME }}}",
+#endif
+        streamingAssetsUrl: "StreamingAssets",
+        companyName: {{{ JSON.stringify(COMPANY_NAME) }}},
+        productName: {{{ JSON.stringify(PRODUCT_NAME) }}},
+        productVersion: {{{ JSON.stringify(PRODUCT_VERSION) }}},
+      }, (progress) => {
+        document.querySelector("#loading-fill").style.width = (100 * progress) + "%";
+      }).then((unityInstance) => {
+        loading.remove();
+        const button = document.querySelector("#fullscreen-button");
+        button.hidden = false;
+        button.onclick = () => unityInstance.SetFullscreen(1);
+      }).catch((message) => {
+        document.querySelector("#loading-text").textContent = "The twin failed to load: " + message;
+      });
+    </script>
+  </body>
+</html>
