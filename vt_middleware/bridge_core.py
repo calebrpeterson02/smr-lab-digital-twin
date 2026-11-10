@@ -11,6 +11,7 @@ Every connected client (a "viewer") picks its own mode, and gets nothing
 until it does: use_latest goes live, select_session replays. Live viewers all
 follow the newest session, so they share one live feed and one DB poll.
 A viewer that selects a session gets its own replay, which no other viewer sees.
+Each viewer has its own outgoing queue, so a slow connection only delays itself.
 """
 import asyncio
 import contextlib
@@ -37,6 +38,13 @@ DB_POOL_MAX_SIZE = 10           # headroom for several bridges + viewers' replay
 WEBSOCKET_HOST = "0.0.0.0"
 SHUTDOWN_TIMEOUT_SECONDS = 5.0  # how long to wait for clients to acknowledge the close on Ctrl+C
 SHUTDOWN_CLOSE_REASON = "bridge was shut down"  # sent with the close; Unity goes by the 1001 code instead
+
+# Messages waiting to go out to one viewer. Live data is ~17 messages/s for the
+# robot and ~4/s for the IMUs, so a viewer this far behind is half a minute or
+# more out of date: it's disconnected, and rejoins at the live edge when Unity reconnects.
+MAX_QUEUED_MESSAGES = 500
+LAGGING_CLOSE_CODE = 1013       # "try again later"; Unity shows it as falling behind
+LAGGING_CLOSE_REASON = "viewer fell too far behind"
 
 # Sessions are registered here by the dashboard's "Start Session" button,
 # before the robot is enabled - so a new session is visible well before its
@@ -100,12 +108,28 @@ class Viewer:
         self.live = False
         self.session_id = None
         self.replay_task = None
+        # Every message to this viewer goes through the outbox, in order, and
+        # sender() writes it to the connection. Shared code (the live feed,
+        # session changes) only queues messages, so a slow connection holds up
+        # nobody else - and never keeps live_lock held while it catches up.
+        self.outbox = asyncio.Queue(MAX_QUEUED_MESSAGES)
+        self.dropped = False            # fell too far behind; its connection is being closed
+        self.close_task = None          # keeps that close running until it's done
+
+    async def sender(self):
+        """Sends queued messages until the connection closes. Runs for as long
+        as the viewer is connected."""
+        with contextlib.suppress(websockets.ConnectionClosed):
+            while True:
+                await self.websocket.send(await self.outbox.get())
 
     async def send(self, payload: dict):
-        await self.websocket.send(json.dumps(payload))
+        """Queues a message, waiting for room if the outbox is full. Only for a
+        viewer's own replay: waiting there slows nobody else down."""
+        await self.outbox.put(json.dumps(payload))
 
-    async def send_session_changed(self):
-        await self.send({
+    def session_changed_message(self):
+        return json.dumps({
             "type": "session_changed",
             "sessionId": self.session_id,
             "autoFollow": self.live,
@@ -119,6 +143,11 @@ class Viewer:
             task.cancel()
             with contextlib.suppress(asyncio.CancelledError):
                 await task
+        # Anything still queued belongs to the session this viewer is leaving
+        # (a live viewer has no replay, and its queued live data stays)
+        if not self.live:
+            while not self.outbox.empty():
+                self.outbox.get_nowait()
 
 
 class Bridge:
@@ -145,12 +174,29 @@ class Bridge:
     def live_viewers(self):
         return [v for v in self.viewers if v.live]
 
+    def post(self, viewer: Viewer, message: str):
+        """Caller holds live_lock. Queues a message for a viewer without waiting
+        on its connection. A full outbox means the viewer can't keep up: it's
+        disconnected, and Unity reconnects and rejoins at the newest data."""
+        if viewer.dropped:
+            return
+        try:
+            viewer.outbox.put_nowait(message)
+        except asyncio.QueueFull:
+            viewer.dropped = True
+            viewer.live = False     # stop feeding it while the close goes through
+            self.log(f"Viewer {viewer.id} fell {MAX_QUEUED_MESSAGES} messages behind; disconnecting it.")
+            # Not awaited: the close waits for the client's reply (up to close_timeout)
+            viewer.close_task = asyncio.create_task(
+                viewer.websocket.close(LAGGING_CLOSE_CODE, LAGGING_CLOSE_REASON))
+
     # --- Clients ---
 
     async def handle_client(self, websocket):
         viewer = Viewer(websocket)
         self.viewers.add(viewer)
         self.log(f"Viewer {viewer.id} connected. Total viewers: {len(self.viewers)}")
+        sender = asyncio.create_task(viewer.sender())
         try:
             # A new viewer gets nothing until it sends use_latest or
             # select_session. Unity sends one right after connecting; after a
@@ -166,8 +212,12 @@ class Bridge:
         except websockets.ConnectionClosed:
             pass    # closed while we were replying; the finally below cleans up
         finally:
-            await viewer.stop_replay()
+            # Removed first, so the live feed stops queueing messages for it
             self.viewers.discard(viewer)
+            await viewer.stop_replay()
+            sender.cancel()
+            with contextlib.suppress(asyncio.CancelledError):
+                await sender
             self.log(f"Viewer {viewer.id} disconnected. Total viewers: {len(self.viewers)}")
 
     async def handle_client_message(self, viewer: Viewer, raw_message: str):
@@ -210,12 +260,11 @@ class Bridge:
         self.cursor = self.source.initial_cursor()
         self.log(f"Live feed now on session {session_id}.")
 
-    async def notify_live_viewers(self):
+    def notify_live_viewers(self):
         """Caller holds live_lock. Tells every live viewer the live session changed."""
-        viewers = self.live_viewers()
-        for viewer in viewers:
+        for viewer in self.live_viewers():
             viewer.session_id = self.live_session
-        await asyncio.gather(*(v.send_session_changed() for v in viewers), return_exceptions=True)
+            self.post(viewer, viewer.session_changed_message())
 
     async def join_live(self, viewer: Viewer):
         """Puts a viewer on the shared live feed (used by use_latest, and when
@@ -224,7 +273,7 @@ class Bridge:
             latest = await get_latest_session_id(self.pool)
             if latest is not None and latest != self.live_session:
                 self.set_live_session(latest)
-                await self.notify_live_viewers()
+                self.notify_live_viewers()
             # The feed doesn't poll while nobody is live, so its cursor may be
             # far behind. The first viewer to join starts it at "now".
             if not self.live_viewers() and self.live_session is not None:
@@ -233,7 +282,7 @@ class Bridge:
             viewer.session_id = self.live_session
             # No session exists yet: the watcher tells this viewer when one appears
             if self.live_session is not None:
-                await viewer.send_session_changed()
+                self.post(viewer, viewer.session_changed_message())
 
     async def session_watcher(self):
         """Moves the live feed to each newly registered session."""
@@ -246,7 +295,7 @@ class Bridge:
                 async with self.live_lock:
                     if latest != self.live_session:  # a viewer joining may have switched already
                         self.set_live_session(latest)
-                        await self.notify_live_viewers()
+                        self.notify_live_viewers()
             except Exception as e:
                 # Skip this check; the next one runs after the normal interval
                 self.log(f"Session watcher error: {type(e).__name__}: {e}")
@@ -266,9 +315,9 @@ class Bridge:
                     for start in range(0, len(rows), size):
                         chunk = rows[start:start + size]
                         message = json.dumps(self.source.to_message(self.live_session, chunk))
-                        # A viewer whose connection failed is removed by its own handler
-                        await asyncio.gather(*(v.websocket.send(message) for v in viewers),
-                                             return_exceptions=True)
+                        # Only queued: each viewer's sender delivers at its own pace
+                        for viewer in viewers:
+                            self.post(viewer, message)
                         self.cursor = self.source.advance(self.cursor, chunk[-1])
             except Exception as e:
                 # Log and retry rather than letting one failure take down the bridge
@@ -283,44 +332,41 @@ class Bridge:
             viewer.live = False
             viewer.session_id = session_id
             self.log(f"Viewer {viewer.id} selected session {session_id}.")
-            await viewer.send_session_changed()
+            self.post(viewer, viewer.session_changed_message())
         viewer.replay_task = asyncio.create_task(self.replay(viewer, session_id))
 
     async def replay(self, viewer: Viewer, session_id):
         """Sends the whole selected session to this viewer as one burst - no
-        pacing, no looping. Unity owns replay pacing/looping, the same way
-        CsvPlaybackAdapter paces a loaded CSV. Cancelled by the viewer's next
-        command or by its disconnect."""
-        try:
-            while True:
-                try:
-                    rows = await self.source.fetch_session(self.pool, session_id)
-                    break
-                except Exception as e:
-                    self.log(f"Replay fetch error for session {session_id}: {type(e).__name__}: {e}. "
-                             f"Retrying in {ERROR_RETRY_SECONDS}s.")
-                    await asyncio.sleep(ERROR_RETRY_SECONDS)
+        pacing, no looping: Unity paces and loops the replay on its TwinClock.
+        Queued at the speed the viewer's connection takes it. Cancelled by the
+        viewer's next command or by its disconnect."""
+        while True:
+            try:
+                rows = await self.source.fetch_session(self.pool, session_id)
+                break
+            except Exception as e:
+                self.log(f"Replay fetch error for session {session_id}: {type(e).__name__}: {e}. "
+                         f"Retrying in {ERROR_RETRY_SECONDS}s.")
+                await asyncio.sleep(ERROR_RETRY_SECONDS)
 
-            if not rows:
-                self.log(f"Session {session_id} has no rows to send. Viewer {viewer.id} falls back to live mode.")
-                await viewer.send({"type": "session_empty", "sessionId": session_id})
-                await self.join_live(viewer)
-                return
+        if not rows:
+            self.log(f"Session {session_id} has no rows to send. Viewer {viewer.id} falls back to live mode.")
+            await viewer.send({"type": "session_empty", "sessionId": session_id})
+            await self.join_live(viewer)
+            return
 
-            self.log(f"Sending session {session_id} to viewer {viewer.id} for local replay: {len(rows)} rows.")
-            size = self.source.rows_per_message
-            for start in range(0, len(rows), size):
-                await viewer.send(self.source.to_message(session_id, rows[start:start + size]))
+        self.log(f"Sending session {session_id} to viewer {viewer.id} for local replay: {len(rows)} rows.")
+        size = self.source.rows_per_message
+        for start in range(0, len(rows), size):
+            await viewer.send(self.source.to_message(session_id, rows[start:start + size]))
 
-            # Explicit end-of-burst marker, so the client knows when it's safe to
-            # start replaying rather than guessing via a timeout
-            await viewer.send({
-                "type": "replay_complete",
-                "sessionId": session_id,
-                "frameCount": len(rows),
-            })
-        except websockets.ConnectionClosed:
-            pass    # viewer left mid-burst; its handler cleans up
+        # Explicit end-of-burst marker, so the client knows when it's safe to
+        # start replaying rather than guessing via a timeout
+        await viewer.send({
+            "type": "replay_complete",
+            "sessionId": session_id,
+            "frameCount": len(rows),
+        })
 
     # --- Lifecycle ---
 

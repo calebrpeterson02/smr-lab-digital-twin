@@ -335,6 +335,8 @@ public abstract class BridgeConnection : MonoBehaviour
         {
             WebSocketCloseCode.Away => "the bridge was shut down",
             WebSocketCloseCode.Abnormal => "the connection was lost",
+            // Sent by the bridge when this viewer's queue of unsent live data is full
+            (WebSocketCloseCode)1013 => "this viewer fell too far behind the live data",
             _ => $"close code {(int)code}",
         };
         ReportStatus($"Bridge connection terminated ({why}). Reconnecting when it's back.", StatusLevel.Warning);
