@@ -1,10 +1,10 @@
 using System;
 using System.Collections.Concurrent;
 using System.Collections.Generic;
-using System.Net.WebSockets;
 using System.Text;
 using System.Threading;
 using System.Threading.Tasks;
+using NativeWebSocket;
 using UnityEngine;
 
 /// <summary>
@@ -19,7 +19,8 @@ public abstract class BridgeConnection : MonoBehaviour
     [Tooltip("Prefix for this bridge's status messages, e.g. \"Robot\" or \"IMU\". Leave empty for the default.")]
     public string displayName = "";
 
-    [Tooltip("e.g. ws://localhost:8765 or ws://<bridge-host>:8765 if running elsewhere.")]
+    [Tooltip("Used in the Editor and desktop builds, e.g. ws://localhost:8765 or ws://<bridge-host>:8765 if running elsewhere. " +
+             "A web build ignores it and connects through the server that served the page.")]
     public string serverUrl = "ws://localhost:8765";
 
     [Tooltip("Give up on a connection attempt after this many seconds (an unreachable host can otherwise hang for a long time).")]
@@ -40,6 +41,12 @@ public abstract class BridgeConnection : MonoBehaviour
     /// <summary>Used when displayName is empty.</summary>
     protected abstract string DefaultName { get; }
     public string Name => string.IsNullOrEmpty(displayName) ? DefaultName : displayName;
+
+    /// <summary>
+    /// Path a web build connects to on the server that served the page, e.g. "/ws/robot".
+    /// The web server (nginx) passes it on to this bridge's port.
+    /// </summary>
+    protected abstract string WebSocketPath { get; }
 
     /// <summary>True while following a live session, false while a replay is loading/playing.</summary>
     protected bool IsLive { get; private set; } = true;
@@ -140,15 +147,19 @@ public abstract class BridgeConnection : MonoBehaviour
     private readonly ConcurrentQueue<(string message, StatusLevel level)> statusQueue =
         new ConcurrentQueue<(string message, StatusLevel level)>();
 
-    private ClientWebSocket socket;
+    // NativeWebSocket rather than System.Net.WebSockets: browsers don't allow raw
+    // sockets, so a web build has to use the browser's own WebSocket, which
+    // NativeWebSocket wraps. In the Editor and desktop builds it uses ClientWebSocket.
+    private WebSocket socket;       // the current connection attempt or open connection
+    private string url;             // where socket connects: serverUrl, or the page's server in a web build
     private CancellationTokenSource cts;
     private Task<bool> connectTask; // latest connection attempt; shared by callers while it's still running
     private bool firstConnection = true;
     private bool retryingQuietly;   // a failure was reported; later retries stay silent until one succeeds
     private int currentSessionId = -1;  // from the last session_changed; re-requested if its replay was cut off
     private readonly ConcurrentQueue<string> incoming = new ConcurrentQueue<string>();
-    // ClientWebSocket allows only one SendAsync in flight at a time
-    private readonly SemaphoreSlim sendLock = new SemaphoreSlim(1, 1);
+
+    private bool IsOpen => socket != null && socket.State == WebSocketState.Open;
 
     protected virtual void Awake()
     {
@@ -163,8 +174,27 @@ public abstract class BridgeConnection : MonoBehaviour
 
     protected virtual void Start()
     {
+        // Keep playing live data while the browser tab or Editor window isn't focused
+        Application.runInBackground = true;
+        url = ResolveUrl();
         cts = new CancellationTokenSource();
         _ = ConnectionLoop();
+    }
+
+    /// <summary>
+    /// serverUrl, except in a web build: there the bridge is reached through the
+    /// server that served the page, so the same build works on any host.
+    /// ws:// for an http page, wss:// for https (browsers block ws:// from https pages).
+    /// </summary>
+    private string ResolveUrl()
+    {
+#if UNITY_WEBGL && !UNITY_EDITOR
+        var page = new Uri(Application.absoluteURL);
+        string scheme = page.Scheme == "https" ? "wss" : "ws";
+        return $"{scheme}://{page.Authority}{WebSocketPath}";
+#else
+        return serverUrl;
+#endif
     }
 
     /// <summary>
@@ -176,13 +206,10 @@ public abstract class BridgeConnection : MonoBehaviour
     {
         while (!cts.IsCancellationRequested)
         {
-            if (socket == null || socket.State != WebSocketState.Open)
-            {
-                await EnsureConnectedAsync();
-            }
+            if (!IsOpen) await EnsureConnectedAsync();
             try
             {
-                await Task.Delay(TimeSpan.FromSeconds(Mathf.Max(reconnectIntervalSeconds, 0.5f)), cts.Token);
+                await WaitUntil(() => false, Mathf.Max(reconnectIntervalSeconds, 0.5f));
             }
             catch (OperationCanceledException)
             {
@@ -192,52 +219,126 @@ public abstract class BridgeConnection : MonoBehaviour
     }
 
     /// <summary>
+    /// Waits until done() is true or `seconds` of real time pass, checking once a
+    /// frame, and returns done(). Unaffected by Time.timeScale. An Awaitable rather
+    /// than Task.Delay, which needs a thread pool that WebGL doesn't have.
+    /// Throws OperationCanceledException on shutdown.
+    /// </summary>
+    private async Awaitable<bool> WaitUntil(Func<bool> done, float seconds)
+    {
+        float end = Time.realtimeSinceStartup + seconds;
+        while (!done() && Time.realtimeSinceStartup < end)
+        {
+            await Awaitable.NextFrameAsync(cts.Token);
+        }
+        return done();
+    }
+
+    /// <summary>
     /// Returns true if the socket is open, connecting first if it isn't.
     /// Concurrent callers (e.g. a button mashed during a slow connect) share
     /// the same attempt instead of each opening their own socket.
     /// </summary>
     private Task<bool> EnsureConnectedAsync()
     {
-        if (socket != null && socket.State == WebSocketState.Open) return Task.FromResult(true);
+        if (IsOpen) return Task.FromResult(true);
         if (connectTask == null || connectTask.IsCompleted) connectTask = ConnectAsync();
         return connectTask;
     }
 
     private async Task<bool> ConnectAsync()
     {
+        // A socket can't be reused once closed, so each attempt needs a fresh one
+        var ws = new WebSocket(url);
+        socket = ws;
+        bool opened = false, closed = false;
+        string error = null;
+
+        // NativeWebSocket raises its events on the main thread. Messages and closes
+        // from a socket that a newer attempt has replaced are ignored.
+        ws.OnOpen += () => opened = true;
+        ws.OnError += message => error = message;
+        ws.OnMessage += bytes =>
+        {
+            if (socket == ws) incoming.Enqueue(Encoding.UTF8.GetString(bytes));
+        };
+        ws.OnClose += code =>
+        {
+            closed = true;
+            if (opened && socket == ws) ReportClosed(code);
+        };
+
+        if (!retryingQuietly) ReportStatus($"Connecting to {url}...");
         try
         {
-            // A ClientWebSocket can't be reused once closed/aborted, so each attempt needs a fresh one
-            socket?.Dispose();
-            var newSocket = new ClientWebSocket();
-            socket = newSocket;
-
-            using var timeout = CancellationTokenSource.CreateLinkedTokenSource(cts.Token);
-            timeout.CancelAfter(TimeSpan.FromSeconds(connectTimeoutSeconds));
-
-            if (!retryingQuietly) ReportStatus($"Connecting to {serverUrl}...");
-            await newSocket.ConnectAsync(new Uri(serverUrl), timeout.Token);
-            retryingQuietly = false;
-            ReportStatus($"Connected to the bridge at {serverUrl}", StatusLevel.Success);
-
-            _ = ReceiveLoop(newSocket); // fire-and-forget; feeds the queue Update() drains
-            await SendStartupCommand();
-            return true;
-        }
-        catch (OperationCanceledException) when (!cts.IsCancellationRequested)
-        {
-            ReportConnectFailure($"Connection to {serverUrl} timed out after {connectTimeoutSeconds}s.");
-            return false;
+            // Not awaited: in the Editor and desktop builds, Connect() only completes
+            // when the connection closes. In WebGL it returns at once. Either way,
+            // OnOpen or OnClose says how the attempt went.
+            _ = ws.Connect();
+            if (!await WaitUntil(() => opened || closed, connectTimeoutSeconds))
+            {
+                Abandon(ws);
+                ReportConnectFailure($"Connection to {url} timed out after {connectTimeoutSeconds}s.");
+                return false;
+            }
         }
         catch (OperationCanceledException)
         {
+            Abandon(ws);
             return false; // shutting down
         }
         catch (Exception e)
         {
-            ReportConnectFailure($"Connection to {serverUrl} failed: {e.Message}");
+            // WebGL's Connect() throws straight away if the socket is in the wrong state
+            ReportConnectFailure($"Connection to {url} failed: {e.Message}");
             return false;
         }
+
+        if (!opened)
+        {
+            ReportConnectFailure(string.IsNullOrEmpty(error)
+                ? $"Connection to {url} failed."
+                : $"Connection to {url} failed: {error}");
+            return false;
+        }
+
+        retryingQuietly = false;
+        ReportStatus($"Connected to the bridge at {url}", StatusLevel.Success);
+        await SendStartupCommand();
+        return true;
+    }
+
+    /// <summary>
+    /// Gives up on a connection attempt that hasn't opened yet. The native and
+    /// WebGL sockets need different calls for this.
+    /// </summary>
+    private void Abandon(WebSocket ws)
+    {
+        if (socket == ws) socket = null;
+#if UNITY_WEBGL && !UNITY_EDITOR
+        try { ws.Close(); } catch (Exception) { }  // the browser aborts a socket closed while connecting
+#else
+        ws.CancelConnection();
+#endif
+    }
+
+    /// <summary>
+    /// The bridge closed the connection, or it dropped. NativeWebSocket passes on
+    /// the close code but not the reason text, so it's the bridge's code 1001
+    /// (Going Away) that says it was shut down.
+    /// </summary>
+    private void ReportClosed(WebSocketCloseCode code)
+    {
+        if (cts.IsCancellationRequested) return; // we closed it ourselves in OnDestroy
+
+        string why = code switch
+        {
+            WebSocketCloseCode.Away => "the bridge was shut down",
+            WebSocketCloseCode.Abnormal => "the connection was lost",
+            _ => $"close code {(int)code}",
+        };
+        ReportStatus($"Bridge connection terminated ({why}). Reconnecting when it's back.", StatusLevel.Warning);
+        retryingQuietly = true; // the message above already says so; don't add a failure per retry
     }
 
     // Only the first failure in a row is shown; ConnectionLoop keeps retrying
@@ -253,24 +354,26 @@ public abstract class BridgeConnection : MonoBehaviour
     /// Tells the bridge what this client wants, right after connecting. The
     /// bridge keeps a new connection idle until told, so a reconnect can't
     /// interrupt a replay that is already playing locally.
+    /// Sends directly rather than through SendCommand: if the socket closed
+    /// already, SendCommand would wait on the connection attempt making this call.
     /// </summary>
     private Task SendStartupCommand()
     {
         if (firstConnection)
         {
             firstConnection = false;
-            return sessionIdOverride >= 0 ? SelectSession(sessionIdOverride) : UseLatest();
+            return Send(sessionIdOverride >= 0 ? SelectSessionCommand(sessionIdOverride) : UseLatestCommand);
         }
-        if (IsLive) return UseLatest();
+        if (IsLive) return Send(UseLatestCommand);
         // The connection dropped while the replay was still downloading: ask again
-        if (!replayReady && currentSessionId >= 0) return SelectSession(currentSessionId);
+        if (!replayReady && currentSessionId >= 0) return Send(SelectSessionCommand(currentSessionId));
         return Task.CompletedTask;  // the whole replay is here; it keeps playing locally
     }
 
     protected virtual void Update()
     {
-        // Drain whatever arrived on the background thread since last frame.
-        // All Unity API access (driver, Transforms) happens here, on the main thread.
+        // Handle whatever arrived since last frame. Messages are queued rather than
+        // handled as they arrive, so they're processed before this frame's playback.
         while (incoming.TryDequeue(out string json))
         {
             ProcessMessage(json);
@@ -371,79 +474,6 @@ public abstract class BridgeConnection : MonoBehaviour
         statusQueue.Enqueue((shown, level));
     }
 
-    // Takes the socket as a parameter rather than reading the field, so a
-    // reconnect swapping in a new socket can't confuse a loop that's winding down
-    private async Task ReceiveLoop(ClientWebSocket socket)
-    {
-        var buffer = new byte[8192];
-
-        try
-        {
-            while (socket.State == WebSocketState.Open && !cts.IsCancellationRequested)
-            {
-                using var ms = new System.IO.MemoryStream();
-                WebSocketReceiveResult result;
-                do
-                {
-                    result = await socket.ReceiveAsync(new ArraySegment<byte>(buffer), cts.Token);
-                    if (result.MessageType == WebSocketMessageType.Close)
-                    {
-                        await HandleServerClose(socket, result);
-                        return;
-                    }
-                    ms.Write(buffer, 0, result.Count);
-                } while (!result.EndOfMessage);
-
-                string json = Encoding.UTF8.GetString(ms.ToArray());
-                incoming.Enqueue(json);
-            }
-        }
-        catch (OperationCanceledException)
-        {
-            // Expected on shutdown - OnDestroy cancels the pending receive
-        }
-        catch (WebSocketException e)
-        {
-            // The bridge went away without a close handshake (e.g. it was killed)
-            ReportStatus($"Connection lost: {e.Message} Reconnecting when it's back.", StatusLevel.Warning);
-            retryingQuietly = true;
-        }
-        catch (Exception e)
-        {
-            ReportStatus($"Receive loop error: {e.Message}", StatusLevel.Error);
-        }
-    }
-
-    // The bridge closed the connection (e.g. Ctrl+C in its terminal). Tell the
-    // user why, then answer the close: ClientWebSocket doesn't reply on its own,
-    // and without a reply the bridge waits out its close timeout.
-    private async Task HandleServerClose(ClientWebSocket socket, WebSocketReceiveResult result)
-    {
-        string reason = string.IsNullOrEmpty(result.CloseStatusDescription)
-            ? $"close code {(int?)result.CloseStatus}"
-            : result.CloseStatusDescription;
-        ReportStatus($"Bridge connection terminated ({reason}). Reconnecting when it's back.", StatusLevel.Warning);
-        retryingQuietly = true; // the message above already says so; don't add a failure per retry
-
-        try
-        {
-            using var timeout = new CancellationTokenSource(TimeSpan.FromSeconds(1));
-            await sendLock.WaitAsync(timeout.Token);  // ClientWebSocket allows one send at a time
-            try
-            {
-                await socket.CloseOutputAsync(WebSocketCloseStatus.NormalClosure, "", timeout.Token);
-            }
-            finally
-            {
-                sendLock.Release();
-            }
-        }
-        catch (Exception)
-        {
-            // Best effort: the bridge closes its side anyway once its timeout runs out
-        }
-    }
-
     private void ProcessMessage(string json)
     {
         Envelope msg;
@@ -514,15 +544,13 @@ public abstract class BridgeConnection : MonoBehaviour
         ReportStatus($"Replaying session {sessionId} ({replayItems.Count} samples)");
     }
 
-    public async Task SelectSession(int sessionId)
-    {
-        await SendCommand($"{{\"command\":\"select_session\",\"sessionId\":{sessionId}}}");
-    }
+    private const string UseLatestCommand = "{\"command\":\"use_latest\"}";
+    private static string SelectSessionCommand(int sessionId) =>
+        $"{{\"command\":\"select_session\",\"sessionId\":{sessionId}}}";
 
-    public async Task UseLatest()
-    {
-        await SendCommand("{\"command\":\"use_latest\"}");
-    }
+    public Task SelectSession(int sessionId) => SendCommand(SelectSessionCommand(sessionId));
+
+    public Task UseLatest() => SendCommand(UseLatestCommand);
 
     private async Task SendCommand(string json)
     {
@@ -532,24 +560,17 @@ public abstract class BridgeConnection : MonoBehaviour
             ReportStatus("Can't send command: not connected to the bridge.", StatusLevel.Warning, consoleDetail: json);
             return;
         }
-        byte[] bytes = Encoding.UTF8.GetBytes(json);
+        await Send(json);
+    }
+
+    private async Task Send(string json)
+    {
         // Callers (e.g. UI buttons) fire-and-forget this task, so failures
-        // must be logged here or they'd vanish silently
+        // must be logged here or they'd vanish silently. NativeWebSocket queues
+        // sends itself, so overlapping commands don't need a lock.
         try
         {
-            await sendLock.WaitAsync(cts.Token);
-            try
-            {
-                await socket.SendAsync(new ArraySegment<byte>(bytes), WebSocketMessageType.Text, true, cts.Token);
-            }
-            finally
-            {
-                sendLock.Release();
-            }
-        }
-        catch (OperationCanceledException)
-        {
-            // Shutting down - nothing to report
+            await socket.SendText(json);
         }
         catch (Exception e)
         {
@@ -557,35 +578,30 @@ public abstract class BridgeConnection : MonoBehaviour
         }
     }
 
-    protected virtual async void OnDestroy()
+    protected virtual void OnDestroy()
     {
         // Don't leave the shared replay waiting for a twin that no longer exists
         if (clock != null) clock.LeaveReplay(this);
 
-        // Close before cancelling: cancelling the pending ReceiveAsync aborts
-        // the socket, after which a close handshake is no longer possible.
-        if (socket != null && socket.State == WebSocketState.Open)
-        {
-            try
-            {
-                // CloseOutputAsync sends our close frame without waiting for the
-                // server's reply, so shutdown can't hang on an unresponsive bridge.
-                // The timeout guards against waiting forever on an in-flight send.
-                using var timeout = new CancellationTokenSource(TimeSpan.FromSeconds(1));
-                await sendLock.WaitAsync(timeout.Token);
-                try
-                {
-                    await socket.CloseOutputAsync(WebSocketCloseStatus.NormalClosure, "closing", timeout.Token);
-                }
-                finally
-                {
-                    sendLock.Release();
-                }
-            }
-            catch { /* best-effort close on shutdown */ }
-        }
+        // Stops ConnectionLoop and any attempt in progress. Also tells ReportClosed
+        // not to report the close below. (Not disposed: socket events may still
+        // arrive and check it.)
         cts?.Cancel();
-        socket?.Dispose();
-        cts?.Dispose();
+
+        if (socket == null) return;
+        if (socket.State == WebSocketState.Open) CloseQuietly(socket);
+        else if (socket.State == WebSocketState.Connecting) Abandon(socket);
+    }
+
+    // Sends a close frame so the bridge drops this viewer straight away. Not
+    // awaited by OnDestroy: the native socket waits for the bridge's reply, and
+    // shutdown shouldn't. Best effort: errors are ignored.
+    private static async void CloseQuietly(WebSocket ws)
+    {
+        try
+        {
+            await ws.Close(WebSocketCloseCode.Normal, "closing");
+        }
+        catch (Exception) { }
     }
 }

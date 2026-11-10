@@ -105,6 +105,7 @@ public class ImuBridgeClient : BridgeConnection
     public float[] startPoseAngles = { 0f, 0f, 0f, 0f, -90f, 0f };
 
     protected override string DefaultName => "IMU";
+    protected override string WebSocketPath => "/ws/imu";
 
     // The IMU-specific fields of a "data" message
     [Serializable]

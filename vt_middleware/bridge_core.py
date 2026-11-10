@@ -36,7 +36,7 @@ DB_POOL_MIN_SIZE = 2            # each bridge's live feed + session watcher quer
 DB_POOL_MAX_SIZE = 10           # headroom for several bridges + viewers' replay fetches
 WEBSOCKET_HOST = "0.0.0.0"
 SHUTDOWN_TIMEOUT_SECONDS = 5.0  # how long to wait for clients to acknowledge the close on Ctrl+C
-SHUTDOWN_CLOSE_REASON = "bridge was shut down"  # sent to clients with the close; Unity displays it
+SHUTDOWN_CLOSE_REASON = "bridge was shut down"  # sent with the close; Unity goes by the 1001 code instead
 
 # Sessions are registered here by the dashboard's "Start Session" button,
 # before the robot is enabled - so a new session is visible well before its
@@ -346,8 +346,9 @@ class Bridge:
             for task in tasks:
                 task.cancel()
             await asyncio.gather(*tasks, return_exceptions=True)
-            # Close each viewer with "going away" (1001) and a reason Unity shows
-            # in its status box. Waits up to close_timeout for each to answer.
+            # Close each viewer with "going away" (1001), which Unity shows as the
+            # bridge being shut down (NativeWebSocket doesn't pass the reason text
+            # on). Waits up to close_timeout for each to answer.
             await asyncio.gather(*(v.websocket.close(1001, SHUTDOWN_CLOSE_REASON)
                                    for v in list(self.viewers)), return_exceptions=True)
             # Stops listening, then waits for the handlers, which cancel their

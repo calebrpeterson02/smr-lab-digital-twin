@@ -17,6 +17,7 @@ public class BridgeClient : BridgeConnection
     public float interpolateMaxGapSeconds = 0.5f;
 
     protected override string DefaultName => "Robot";
+    protected override string WebSocketPath => "/ws/robot";
 
     private double lastFrameTime = double.NaN; // recorded time of the previous frame received
 
