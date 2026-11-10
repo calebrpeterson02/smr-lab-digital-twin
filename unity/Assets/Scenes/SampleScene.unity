@@ -4489,14 +4489,6 @@ PrefabInstance:
       propertyPath: m_LocalEulerAnglesHint.z
       value: 0
       objectReference: {fileID: 0}
-    - target: {fileID: 5196086318138672827, guid: f749d217427c9660b9538f4751820249, type: 3}
-      propertyPath: m_Enabled
-      value: 0
-      objectReference: {fileID: 0}
-    - target: {fileID: 5196086318138672827, guid: f749d217427c9660b9538f4751820249, type: 3}
-      propertyPath: csvFilePath
-      value: /home/administrator/Documents/Session CSVs/Session402_Robot.csv
-      objectReference: {fileID: 0}
     - target: {fileID: 5561471360179316483, guid: f749d217427c9660b9538f4751820249, type: 3}
       propertyPath: joints.Array.data[1].rotationAxis.z
       value: 1
@@ -5116,14 +5108,6 @@ PrefabInstance:
     - target: {fileID: 4156027482202696889, guid: f749d217427c9660b9538f4751820249, type: 3}
       propertyPath: m_LocalEulerAnglesHint.z
       value: 0
-      objectReference: {fileID: 0}
-    - target: {fileID: 5196086318138672827, guid: f749d217427c9660b9538f4751820249, type: 3}
-      propertyPath: m_Enabled
-      value: 0
-      objectReference: {fileID: 0}
-    - target: {fileID: 5196086318138672827, guid: f749d217427c9660b9538f4751820249, type: 3}
-      propertyPath: csvFilePath
-      value: /home/administrator/Documents/Session CSVs/Session402_Robot.csv
       objectReference: {fileID: 0}
     - target: {fileID: 5561471360179316483, guid: f749d217427c9660b9538f4751820249, type: 3}
       propertyPath: joints.Array.data[1].rotationAxis.z
