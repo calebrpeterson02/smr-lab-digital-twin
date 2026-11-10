@@ -25,8 +25,15 @@ The WebGL build embeds the meshes, so it must only be served on the lab network.
 build and passes its WebSocket connections (`/ws/robot`, `/ws/imu`) to the bridges, which read
 from Postgres. Viewers only need a browser.
 
-1. **Database connection.** Create `vt_middleware/.env` with `DB_DSN=postgresql://...`
-   (the same file the bridges use when run directly).
+1. **Database connection.** Create `vt_middleware/.env` (the same file the bridges use when run
+   directly) with the database's address and login:
+   ```
+   DB_HOST=192.168.1.104
+   DB_PORT=5433
+   DB_USER=...
+   DB_PASSWORD=...
+   DB_NAME=manufacturing_db
+   ```
 2. **WebGL build.** In Unity, on a machine that has the robot meshes:
    - File > Build Profiles > Web, then Switch Platform.
    - Player Settings > Publishing Settings: set Compression Format to **Gzip**. The site is

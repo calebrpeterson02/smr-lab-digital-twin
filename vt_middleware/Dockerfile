@@ -1,6 +1,6 @@
 # Image for the Postgres -> WebSocket bridges (robot on 8765, IMU on 8766).
-# Built and started by docker-compose.yml in the repo root; DB_DSN comes from
-# the environment there, not from a .env file in the image.
+# Built and started by docker-compose.yml in the repo root; the DB_* settings
+# come from the environment there, not from a .env file in the image.
 FROM python:3.12-slim
 
 # Print log lines straight away, so `docker compose logs` keeps up

@@ -420,14 +420,38 @@ def install_stop_handlers(stop: asyncio.Event):
         loop.add_signal_handler(sig, on_signal, sig.name)
 
 
+def database_settings():
+    """asyncpg connection arguments from DB_HOST, DB_PORT, DB_USER, DB_PASSWORD
+    and DB_NAME - the names the lab machines' environment files already use.
+    Passed separately rather than as a postgresql:// URL, so a password with
+    characters like @ or / needs no escaping."""
+    env_file = Path(__file__).with_name(".env")
+    names = ("DB_HOST", "DB_PORT", "DB_USER", "DB_PASSWORD", "DB_NAME")
+    host = os.environ.get("DB_HOST", "")
+    if "://" in host:
+        raise SystemExit("DB_HOST should be just the database's address (e.g. 192.168.1.104), "
+                         "not a postgresql:// URL. Port, user, password and database name go in "
+                         "DB_PORT, DB_USER, DB_PASSWORD and DB_NAME.")
+    missing = [name for name in names if not os.environ.get(name)]
+    if missing:
+        # Without this check asyncpg silently falls back to defaults such as
+        # localhost:5432, which fails with a confusing "connection refused"
+        raise SystemExit(f"Database settings missing: {', '.join(missing)}. "
+                         f"Set them in {env_file} or in the environment.")
+
+    try:
+        port = int(os.environ["DB_PORT"])
+    except ValueError:
+        raise SystemExit(f"DB_PORT must be a number, got {os.environ['DB_PORT']!r}.")
+
+    return {"host": host, "port": port, "user": os.environ["DB_USER"],
+            "password": os.environ["DB_PASSWORD"], "database": os.environ["DB_NAME"]}
+
+
 async def serve(*bridges: Bridge):
     """Runs one or more bridges in this process, sharing one connection pool,
     until Ctrl+C or SIGTERM."""
-    dsn = os.environ.get("DB_DSN")
-    if not dsn:
-        # Without this check asyncpg silently falls back to localhost:5432,
-        # which fails with a confusing "connection refused"
-        raise SystemExit(f"DB_DSN is not set. Put it in {Path(__file__).with_name('.env')}.")
+    db = database_settings()
 
     stop = asyncio.Event()
     install_stop_handlers(stop)
@@ -437,7 +461,7 @@ async def serve(*bridges: Bridge):
     # connection can only run one query at a time. pool.fetch()/fetchval()
     # each borrow a free connection for the duration of the query.
     async def connect():
-        return await asyncpg.create_pool(dsn, min_size=DB_POOL_MIN_SIZE, max_size=DB_POOL_MAX_SIZE)
+        return await asyncpg.create_pool(**db, min_size=DB_POOL_MIN_SIZE, max_size=DB_POOL_MAX_SIZE)
 
     # Race the connection against Ctrl+C: with the NAS unreachable, connecting
     # can take a minute to time out, and Ctrl+C should stop it straight away

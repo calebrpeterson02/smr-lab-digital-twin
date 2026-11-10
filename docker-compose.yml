@@ -3,13 +3,14 @@
 #
 #   browser --http--> web:80 -+- WebGL build (deploy/webgl/)
 #                             +- /ws/robot -> bridges:8765 -+
-#                             +- /ws/imu   -> bridges:8766 -+-> Postgres (DB_DSN)
+#                             +- /ws/imu   -> bridges:8766 -+-> Postgres (DB_HOST, ...)
 #
 # Start:   docker compose up -d --build
 # Logs:    docker compose logs -f
 # Stop:    docker compose down
 #
-# Needs vt_middleware/.env with DB_DSN, and a Unity WebGL build in deploy/webgl/
+# Needs vt_middleware/.env with DB_HOST, DB_PORT, DB_USER, DB_PASSWORD and
+# DB_NAME, and a Unity WebGL build in deploy/webgl/
 # (see README.md).
 
 services:
