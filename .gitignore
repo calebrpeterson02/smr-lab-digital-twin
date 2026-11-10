@@ -41,3 +41,6 @@ unity/crashlytics-build.properties
 unity/*.pidb.meta
 unity/*.pdb.meta
 unity/*.mdb.meta
+
+# Unity WebGL build output (served by nginx; contains the licensed meshes, so never committed)
+/deploy/webgl/

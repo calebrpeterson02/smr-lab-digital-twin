@@ -1,0 +1,35 @@
+# The digital twin in the browser: nginx serves the Unity WebGL build and
+# proxies its WebSockets to the bridges, which read from Postgres.
+#
+#   browser --http--> web:80 -+- WebGL build (deploy/webgl/)
+#                             +- /ws/robot -> bridges:8765 -+
+#                             +- /ws/imu   -> bridges:8766 -+-> Postgres (DB_DSN)
+#
+# Start:   docker compose up -d --build
+# Logs:    docker compose logs -f
+# Stop:    docker compose down
+#
+# Needs vt_middleware/.env with DB_DSN, and a Unity WebGL build in deploy/webgl/
+# (see README.md).
+
+services:
+  bridges:
+    build: ./vt_middleware
+    env_file: ./vt_middleware/.env
+    restart: unless-stopped
+    # Longer than the bridge's own 5 s close timeout, so viewers get a clean close
+    stop_grace_period: 10s
+
+  web:
+    image: nginx:stable-alpine
+    ports:
+      # Host port 80 by default; set WEB_PORT (e.g. WEB_PORT=8080) if it's taken
+      - "${WEB_PORT:-80}:80"
+    volumes:
+      # Mounted rather than built into an image: the WebGL build contains the
+      # licensed FANUC meshes, which must not end up in a pushed image
+      - ./deploy/webgl:/usr/share/nginx/html:ro
+      - ./deploy/nginx:/etc/nginx/conf.d:ro
+    depends_on:
+      - bridges
+    restart: unless-stopped

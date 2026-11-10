@@ -18,3 +18,26 @@ line up without matching that hierarchy. The `.fbx.meta` files are tracked, so U
 the prefab once the file is in place.
 
 The WebGL build embeds the meshes, so it must only be served on the lab network.
+
+## Running in a browser (Docker)
+
+`docker-compose.yml` runs the twin as a website on the lab network: nginx serves the Unity WebGL
+build and passes its WebSocket connections (`/ws/robot`, `/ws/imu`) to the bridges, which read
+from Postgres. Viewers only need a browser.
+
+1. **Database connection.** Create `vt_middleware/.env` with `DB_DSN=postgresql://...`
+   (the same file the bridges use when run directly).
+2. **WebGL build.** In Unity, on a machine that has the robot meshes:
+   - File > Build Profiles > Web, then Switch Platform.
+   - Player Settings > Publishing Settings: set Compression Format to **Gzip**. The site is
+     served over http, and browsers only accept Brotli over https.
+   - Build into `deploy/webgl/` (gitignored: the build contains the licensed meshes).
+3. **Start it** from the repo root:
+   ```bash
+   docker compose up -d --build
+   ```
+   Then open `http://<host>/`. If port 80 is taken, run with `WEB_PORT=8080`, for example.
+
+`docker compose logs -f` shows the bridge and nginx logs; `docker compose down` stops everything.
+After a new WebGL build, just reload the page. After changing the bridge code, run
+`docker compose up -d --build` again.

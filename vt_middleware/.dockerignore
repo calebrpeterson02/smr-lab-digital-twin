@@ -1,0 +1,8 @@
+# Keep the build context to what the image needs. .env in particular must
+# never be copied into an image: it holds the database password.
+.env
+venv/
+__pycache__/
+*.pyc
+graphify-out/
+CLAUDE.md
