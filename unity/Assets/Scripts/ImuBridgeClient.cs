@@ -26,6 +26,11 @@ using UnityEngine;
 /// Instead the J4 link is rebuilt from IMU 282 (J3 link) and the J4 angle, and
 /// J5 is the wrist link's rotation relative to it. See "J5 IMU Kinematics".
 ///
+/// J6 uses the same idea one link further (KinematicHand): IMU 289 sits on the
+/// J6 link, and its rotation relative to the rebuilt J4 link is J5 then J6, so
+/// both angles can be read off it. J5 can use this too, which doesn't need
+/// IMU 283 at all (283 has read a frozen 0,0,0 in every session since 534).
+///
 /// The quaternions are only used for this arithmetic and never applied to a
 /// Transform, so they stay in the IMU's own (right-handed) frame - no
 /// conversion to Unity's left-handed axes is needed.
@@ -42,6 +47,7 @@ public class ImuBridgeClient : BridgeConnection
         ImuPitch,       // this joint's IMU's raw pitch
         ImuRoll,        // this joint's IMU's raw roll
         KinematicWrist, // J5 only: wrist link (IMU 283) relative to the J4 link rebuilt from IMU 282 + J4
+        KinematicHand,  // J5 or J6: J6 link (IMU 289) relative to the J4 link rebuilt from IMU 282 + J4
     }
 
     public enum ReferenceChannel
@@ -78,9 +84,12 @@ public class ImuBridgeClient : BridgeConnection
     // and IMU 281's pitch = joint_2 over the recorded motion, but no session bends
     // the elbow relative to the lower arm yet. J5 uses the kinematic method: within
     // 0.47-0.99 deg of the robot in 12 sessions (7 not used for fitting), versus 5.6-10.2
-    // deg for IMU 283's yaw minus IMU 282's pitch. J5 never moves in the recorded
-    // sessions, so accuracy during real J5 motion is untested.
-    [Header("Joint estimation, J1-J5 (no J6 IMU yet)")]
+    // deg for IMU 283's yaw minus IMU 282's pitch. J5 first moves in sessions 544-548,
+    // but IMU 283 reads a frozen 0,0,0 there, so KinematicWrist is untested in motion.
+    // J6 (KinematicHand) checked on sessions 544-548, the first where J5 and J6 move
+    // (J5 -90 -> -60, J6 0 -> 30): J6 within ~0.6 deg mean / 3.1 max, and J5 by the
+    // same method within ~0.5 / 2.3 (544/545 used for fitting, 547/548 not).
+    [Header("Joint estimation, J1-J6")]
     public JointAxis[] jointAxes =
     {
         new JointAxis { axis = new Vector3(0, 0, 1), sign = 1f },   // J1: vertical
@@ -88,6 +97,7 @@ public class ImuBridgeClient : BridgeConnection
         new JointAxis { axis = new Vector3(0, 1, 0), sign = -1f },  // J3: pitch, relative to J2's IMU
         new JointAxis { method = Method.ImuPitch, axis = new Vector3(0, 1, 0), sign = 1f },  // J4: IMU 279's pitch
         new JointAxis { method = Method.KinematicWrist, axis = new Vector3(0, 1, 0), sign = 1f },  // J5: kinematic
+        new JointAxis { method = Method.KinematicHand, axis = new Vector3(1, 0, 0), sign = 1f },   // J6: kinematic
     };
 
     // How IMUs 282 and 283 sit on their links, fitted from sessions 514/510/451/418/415
@@ -100,8 +110,14 @@ public class ImuBridgeClient : BridgeConnection
     [Tooltip("IMU 283 (J5 link) mounting, quaternion (w, x, y, z).")]
     public Vector4 j5ImuMounting = new Vector4(0.720940f, -0.003781f, -0.692828f, 0.014837f);
 
+    // Fitted from sessions 544/545 the same way: like 283, turned ~90 deg about Y, with a
+    // ~5.5 deg tilt. Reproduces IMU 289's readings within ~0.6 deg mean in 544-548.
+    [Header("Kinematic J6 (fitted IMU mounting - don't edit by hand)")]
+    [Tooltip("IMU 289 (J6 link) mounting, quaternion (w, x, y, z).")]
+    public Vector4 j6ImuMounting = new Vector4(0.701760f, 0.047892f, -0.710802f, -0.000465f);
+
     [Tooltip("Robot joint angles (degrees, J1-J6) at the pose the IMUs were tared in - the start pose " +
-             "of every session so far. J6 has no IMU, so it stays at this value.")]
+             "of every session so far.")]
     public float[] startPoseAngles = { 0f, 0f, 0f, 0f, -90f, 0f };
 
     protected override string DefaultName => "IMU";
@@ -118,7 +134,7 @@ public class ImuBridgeClient : BridgeConnection
     private class Sample
     {
         public int deviceId;
-        public int joint;           // 1-5; 0 = IMU not mapped to a joint by the bridge
+        public int joint;           // 1-6; 0 = IMU not mapped to a joint by the bridge
         public double recordedAt;   // seconds
         public float[] quat;        // w, x, y, z
         public float[] ypr;         // raw yaw, pitch, roll in degrees
@@ -190,6 +206,16 @@ public class ImuBridgeClient : BridgeConnection
                 continue;
             }
 
+            if (config.method == Method.KinematicHand)
+            {
+                // Gives J5 and J6 together; keep the one this joint is. Uses this frame's J4 (angles[3])
+                if (TryKinematicHand(angles[3], out float hand5, out float hand6))
+                {
+                    angles[j - 1] = j == 5 ? hand5 : hand6;
+                }
+                continue;
+            }
+
             if (config.method != Method.RelativeTwist)
             {
                 // Read one of this joint's IMU angles directly
@@ -253,20 +279,60 @@ public class ImuBridgeClient : BridgeConnection
         j5 = 0f;
         if (latest[3] is not Quaternion imu282 || latest[5] is not Quaternion imu283) return false;
 
-        // Start (tare) pose. startPoseAngles are rig angles, where J3 is relative to the
-        // lower arm; the kinematics use the controller's J3 (relative to horizontal).
-        float Start(int i) => i < startPoseAngles.Length ? startPoseAngles[i] : 0f;
-        Quaternion l3Start = Rz(Start(0)) * Ry(-(Start(2) - Start(1)));
-        Quaternion l5Start = l3Start * Rx(-Start(3)) * Ry(-Start(4));
+        Quaternion l3Start = J3LinkAtStart();
+        Quaternion l5Start = l3Start * Rx(-StartPoseAngle(3)) * Ry(-StartPoseAngle(4));
 
-        Quaternion m3 = FromWxyz(j3ImuMounting), m5 = FromWxyz(j5ImuMounting);
-        Quaternion l3 = l3Start * m3 * imu282 * Quaternion.Inverse(m3);
-        Quaternion l5 = l5Start * m5 * imu283 * Quaternion.Inverse(m5);
+        Quaternion l3 = LinkFromImu(l3Start, j3ImuMounting, imu282);
+        Quaternion l5 = LinkFromImu(l5Start, j5ImuMounting, imu283);
         Quaternion l4 = l3 * Rx(-j4);
 
         // The wrist relative to the J4 link should be a pure turn about Y by -J5
         j5 = -TwistDegrees(Quaternion.Inverse(l4) * l5, new Vector3(0, 1, 0));
         return true;
+    }
+
+    /// <summary>
+    /// J5 and J6 from the J6 link (IMU 289), one link further down the same chain:
+    ///   J6 link  L6 = L4 . Ry(-J5) . Rx(-J6)    (J6 sign checked against the controller's pose data)
+    /// L4 is rebuilt from IMU 282 and the J4 angle as in TryKinematicWrist, and L6 comes
+    /// from IMU 289's full orientation. Then L4^-1 . L6 = Ry(-J5) . Rx(-J6). False until
+    /// both IMUs have reported.
+    /// </summary>
+    private bool TryKinematicHand(float j4, out float j5, out float j6)
+    {
+        j5 = j6 = 0f;
+        if (latest[3] is not Quaternion imu282 || latest[6] is not Quaternion imu289) return false;
+
+        Quaternion l3Start = J3LinkAtStart();
+        Quaternion l6Start = l3Start * Rx(-StartPoseAngle(3)) * Ry(-StartPoseAngle(4)) * Rx(-StartPoseAngle(5));
+
+        Quaternion l4 = LinkFromImu(l3Start, j3ImuMounting, imu282) * Rx(-j4);
+        Quaternion l6 = LinkFromImu(l6Start, j6ImuMounting, imu289);
+        Quaternion rel = Quaternion.Inverse(l4) * l6;   // Ry(-J5) . Rx(-J6)
+
+        // Rx(-J6) leaves the X axis where it is, so rel carries X exactly as Ry(-J5) does:
+        // to (cos J5, 0, sin J5). Its angle in the X-Z plane is J5.
+        Vector3 x = rel * new Vector3(1, 0, 0);
+        j5 = Mathf.Atan2(x.z, x.x) * Mathf.Rad2Deg;
+
+        // Undo the J5 turn; what's left should be a pure turn about X by -J6
+        j6 = -TwistDegrees(Quaternion.Inverse(Ry(-j5)) * rel, new Vector3(1, 0, 0));
+        return true;
+    }
+
+    // Start (tare) pose angle of joint index i (0 = J1)
+    private float StartPoseAngle(int i) => i < startPoseAngles.Length ? startPoseAngles[i] : 0f;
+
+    // J3 link at the start pose. startPoseAngles are rig angles, where J3 is relative to
+    // the lower arm; the kinematics use the controller's J3 (relative to horizontal).
+    private Quaternion J3LinkAtStart() => Rz(StartPoseAngle(0)) * Ry(-(StartPoseAngle(2) - StartPoseAngle(1)));
+
+    // A link's orientation from its IMU: link at the start pose . mounting . reading
+    // since the tare . mounting^-1 (the reading is in the sensor's own axes)
+    private static Quaternion LinkFromImu(Quaternion linkAtStart, Vector4 mountingWxyz, Quaternion reading)
+    {
+        Quaternion m = FromWxyz(mountingWxyz);
+        return linkAtStart * m * reading * Quaternion.Inverse(m);
     }
 
     // Rotations about the robot's base axes (degrees). Pure quaternion arithmetic in

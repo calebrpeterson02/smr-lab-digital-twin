@@ -25,9 +25,9 @@ public class JointComparisonPanel : MonoBehaviour
     public RobotJointDriver imuTwin;
     public RobotJointDriver cameraTwin;
 
-    [Tooltip("How many joints, from J1, the IMU twin actually measures. J6 has no IMU yet, so it " +
-             "only holds its start-pose value - shown as N/A.")]
-    [Range(0, 6)] public int imuMeasuredJoints = 5;
+    [Tooltip("How many joints, from J1, the IMU twin actually measures. Joints past this " +
+             "only hold their start-pose value - shown as N/A.")]
+    [Range(0, 6)] public int imuMeasuredJoints = 6;
 
     [Tooltip("How many joints, from J1, the camera twin measures (once it exists).")]
     [Range(0, 6)] public int cameraMeasuredJoints = 6;

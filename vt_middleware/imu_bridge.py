@@ -17,8 +17,9 @@ TABLE_NAME = "imu_measurement"
 SESSION_ID_COLUMN = "session_id"
 WEBSOCKET_PORT = 8766
 
-# device.id -> robot joint the IMU is mounted on. No J6 IMU yet.
-DEVICE_TO_JOINT = {280: 1, 281: 2, 282: 3, 279: 4, 283: 5}
+# device.id -> robot joint the IMU is mounted on. 289 (J6) first reports in
+# session 534; its readings match the J6 link's motion in sessions 544-548.
+DEVICE_TO_JOINT = {280: 1, 281: 2, 282: 3, 279: 4, 283: 5, 289: 6}
 
 COLUMNS_SQL = "id, device_id, frame_id, recorded_at, yaw, pitch, roll"
 
@@ -47,7 +48,7 @@ class ImuSource(DataSource):
     it follows insert order across all IMUs (checked on session 503: no
     out-of-order rows), and `id > cursor` can use the primary key index."""
     name = "imu"
-    # ~5 IMUs at ~100 Hz: a live poll returns ~25 rows, a replay ~15-20k.
+    # ~6 IMUs at ~70-100 Hz: a live poll returns ~25 rows, a replay ~15-20k.
     # Batching keeps that to a sensible number of messages.
     rows_per_message = 100
 
