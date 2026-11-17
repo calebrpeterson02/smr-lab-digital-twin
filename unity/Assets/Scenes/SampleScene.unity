@@ -1760,7 +1760,7 @@ RectTransform:
   m_LocalEulerAnglesHint: {x: 0, y: 0, z: 0}
   m_AnchorMin: {x: 0.5, y: 0.5}
   m_AnchorMax: {x: 0.5, y: 0.5}
-  m_AnchoredPosition: {x: 260, y: -11.3}
+  m_AnchoredPosition: {x: 260, y: -11.299988}
   m_SizeDelta: {x: 200, y: 50}
   m_Pivot: {x: 0.5, y: 0.5}
 --- !u!114 &481113762
@@ -3687,7 +3687,7 @@ MeshRenderer:
   m_RenderingLayerMask: 1
   m_RendererPriority: 0
   m_Materials:
-  - {fileID: 2100000, guid: 31321ba15b8f8eb4c954353edc038b1d, type: 2}
+  - {fileID: 2100000, guid: 532805db1cc34bb78b11ea4bbb911e36, type: 2}
   m_StaticBatchInfo:
     firstSubMesh: 0
     subMeshCount: 0
@@ -3728,8 +3728,8 @@ Transform:
   m_GameObject: {fileID: 1496699638}
   serializedVersion: 2
   m_LocalRotation: {x: 0, y: 0, z: 0, w: 1}
-  m_LocalPosition: {x: 0, y: 0, z: 3.381}
-  m_LocalScale: {x: 27.054998, y: 1, z: 20.435}
+  m_LocalPosition: {x: 0, y: 0, z: 0}
+  m_LocalScale: {x: 15, y: 1, z: 15}
   m_ConstrainProportionsScale: 0
   m_Children: []
   m_Father: {fileID: 0}
@@ -4056,6 +4056,76 @@ CanvasRenderer:
   m_PrefabAsset: {fileID: 0}
   m_GameObject: {fileID: 1633525025}
   m_CullTransparentMesh: 1
+--- !u!1 &1633526906
+GameObject:
+  m_ObjectHideFlags: 0
+  m_CorrespondingSourceObject: {fileID: 0}
+  m_PrefabInstance: {fileID: 0}
+  m_PrefabAsset: {fileID: 0}
+  serializedVersion: 6
+  m_Component:
+  - component: {fileID: 1633526908}
+  - component: {fileID: 1633526907}
+  m_Layer: 0
+  m_Name: Safety Cage
+  m_TagString: Untagged
+  m_Icon: {fileID: 0}
+  m_NavMeshLayer: 0
+  m_StaticEditorFlags: 0
+  m_IsActive: 1
+--- !u!114 &1633526907
+MonoBehaviour:
+  m_ObjectHideFlags: 0
+  m_CorrespondingSourceObject: {fileID: 0}
+  m_PrefabInstance: {fileID: 0}
+  m_PrefabAsset: {fileID: 0}
+  m_GameObject: {fileID: 1633526906}
+  m_Enabled: 1
+  m_EditorHideFlags: 0
+  m_Script: {fileID: 11500000, guid: acf2e0fde722c8e80b91393870c19dd6, type: 3}
+  m_Name: 
+  m_EditorClassIdentifier: Assembly-CSharp::SafetyCage
+  twins:
+  - {fileID: 789115314}
+  - {fileID: 1860801932}
+  sideLength: 9
+  height: 3.048
+  maxPanelWidth: 1.2
+  panelBottomGap: 0.15
+  postWidth: 0.06
+  panelFrameWidth: 0.03
+  meshCellSize: 0.05
+  doorSide: 3
+  doorWidth: 1.2
+  doorHeight: 3.048
+  doorOffset: -2.79
+  floorTape: 1
+  tapeWidth: 0.075
+  tapeInset: 0.3
+  lowerArmLengthMetres: 1.075
+  unitsPerMetre: 1
+  measureScale: 1
+  frameMaterial: {fileID: 0}
+  meshMaterial: {fileID: 2100000, guid: 9d0b31673a03da1bd8836e26e7f91a1b, type: 2}
+  postColor: {r: 1, g: 0.78, b: 0, a: 1}
+  panelFrameColor: {r: 0.08, g: 0.08, b: 0.08, a: 1}
+  doorColor: {r: 1, g: 0.4, b: 0.05, a: 1}
+  meshColor: {r: 0.25, g: 0.25, b: 0.25, a: 1}
+--- !u!4 &1633526908
+Transform:
+  m_ObjectHideFlags: 0
+  m_CorrespondingSourceObject: {fileID: 0}
+  m_PrefabInstance: {fileID: 0}
+  m_PrefabAsset: {fileID: 0}
+  m_GameObject: {fileID: 1633526906}
+  serializedVersion: 2
+  m_LocalRotation: {x: 0, y: 0, z: 0, w: 1}
+  m_LocalPosition: {x: 0.54, y: 0.5, z: 4.35}
+  m_LocalScale: {x: 1, y: 1, z: 1}
+  m_ConstrainProportionsScale: 0
+  m_Children: []
+  m_Father: {fileID: 0}
+  m_LocalEulerAnglesHint: {x: 0, y: 0, z: 0}
 --- !u!1 &1675037439
 GameObject:
   m_ObjectHideFlags: 0
@@ -4570,8 +4640,14 @@ MonoBehaviour:
     referenceJoint: 3
     referenceChannel: 2
     sign: 1
+  - method: 5
+    axis: {x: 1, y: 0, z: 0}
+    referenceJoint: 3
+    referenceChannel: 2
+    sign: 1
   j3ImuMounting: {x: 0.997445, y: 0.023445, z: -0.054954, w: -0.039162}
   j5ImuMounting: {x: 0.72094, y: -0.003781, z: -0.692828, w: 0.014837}
+  j6ImuMounting: {x: 0.70176, y: 0.047892, z: -0.710802, w: -0.000465}
   startPoseAngles:
   - 0
   - 0
@@ -4779,7 +4855,7 @@ MonoBehaviour:
   robotTwin: {fileID: 789115314}
   imuTwin: {fileID: 1860801932}
   cameraTwin: {fileID: 0}
-  imuMeasuredJoints: 5
+  imuMeasuredJoints: 6
   cameraMeasuredJoints: 6
   tableText: {fileID: 0}
   j3InControllerConvention: 1
@@ -5138,3 +5214,4 @@ SceneRoots:
   - {fileID: 1009093087}
   - {fileID: 390598814}
   - {fileID: 1920547443}
+  - {fileID: 1633526908}
