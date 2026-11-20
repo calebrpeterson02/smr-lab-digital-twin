@@ -2053,6 +2053,7 @@ GameObject:
   - component: {fileID: 804246818}
   - component: {fileID: 804246820}
   - component: {fileID: 804246819}
+  - component: {fileID: 804246821}
   m_Layer: 5
   m_Name: InfoPanel
   m_TagString: Untagged
@@ -2118,6 +2119,31 @@ CanvasRenderer:
   m_PrefabAsset: {fileID: 0}
   m_GameObject: {fileID: 804246817}
   m_CullTransparentMesh: 1
+--- !u!114 &804246821
+MonoBehaviour:
+  m_ObjectHideFlags: 0
+  m_CorrespondingSourceObject: {fileID: 0}
+  m_PrefabInstance: {fileID: 0}
+  m_PrefabAsset: {fileID: 0}
+  m_GameObject: {fileID: 804246817}
+  m_Enabled: 1
+  m_EditorHideFlags: 0
+  m_Script: {fileID: 11500000, guid: 473c9c8d5700433487e0014089a1b685, type: 3}
+  m_Name: 
+  m_EditorClassIdentifier: Assembly-CSharp::CollapsiblePanel
+  toggleButton: {fileID: 0}
+  expandedLabel: '-'
+  collapsedLabel: Joint table
+  startCollapsed: 0
+  expandedButtonSize: {x: 40, y: 26}
+  collapsedButtonSize: {x: 140, y: 30}
+  buttonPlacement: 1
+  buttonMargin: 8
+  expandedButtonColor: {r: 0.5294118, g: 0.5294118, b: 0.5294118, a: 1}
+  expandedTextColor: {r: 1, g: 1, b: 1, a: 1}
+  collapsedButtonColor: {r: 1, g: 1, b: 1, a: 1}
+  collapsedTextColor: {r: 0.2, g: 0.2, b: 0.2, a: 1}
+  fontSize: 18
 --- !u!1 &832575517
 GameObject:
   m_ObjectHideFlags: 0
@@ -2311,6 +2337,7 @@ GameObject:
   - component: {fileID: 932091486}
   - component: {fileID: 932091488}
   - component: {fileID: 932091487}
+  - component: {fileID: 932091489}
   m_Layer: 5
   m_Name: Panel
   m_TagString: Untagged
@@ -2387,6 +2414,31 @@ CanvasRenderer:
   m_PrefabAsset: {fileID: 0}
   m_GameObject: {fileID: 932091485}
   m_CullTransparentMesh: 1
+--- !u!114 &932091489
+MonoBehaviour:
+  m_ObjectHideFlags: 0
+  m_CorrespondingSourceObject: {fileID: 0}
+  m_PrefabInstance: {fileID: 0}
+  m_PrefabAsset: {fileID: 0}
+  m_GameObject: {fileID: 932091485}
+  m_Enabled: 1
+  m_EditorHideFlags: 0
+  m_Script: {fileID: 11500000, guid: 473c9c8d5700433487e0014089a1b685, type: 3}
+  m_Name: 
+  m_EditorClassIdentifier: Assembly-CSharp::CollapsiblePanel
+  toggleButton: {fileID: 0}
+  expandedLabel: '-'
+  collapsedLabel: Controls
+  startCollapsed: 0
+  expandedButtonSize: {x: 20, y: 12}
+  collapsedButtonSize: {x: 140, y: 30}
+  buttonPlacement: 0
+  buttonMargin: 8
+  expandedButtonColor: {r: 0.5294118, g: 0.5294118, b: 0.5294118, a: 1}
+  expandedTextColor: {r: 1, g: 1, b: 1, a: 1}
+  collapsedButtonColor: {r: 1, g: 1, b: 1, a: 1}
+  collapsedTextColor: {r: 0.2, g: 0.2, b: 0.2, a: 1}
+  fontSize: 16
 --- !u!1 &936499950
 GameObject:
   m_ObjectHideFlags: 0
