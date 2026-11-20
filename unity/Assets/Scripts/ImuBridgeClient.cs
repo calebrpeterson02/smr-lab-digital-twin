@@ -84,11 +84,12 @@ public class ImuBridgeClient : BridgeConnection
     // and IMU 281's pitch = joint_2 over the recorded motion, but no session bends
     // the elbow relative to the lower arm yet. J5 uses the kinematic method: within
     // 0.47-0.99 deg of the robot in 12 sessions (7 not used for fitting), versus 5.6-10.2
-    // deg for IMU 283's yaw minus IMU 282's pitch. J5 first moves in sessions 544-548,
-    // but IMU 283 reads a frozen 0,0,0 there, so KinematicWrist is untested in motion.
-    // J6 (KinematicHand) checked on sessions 544-548, the first where J5 and J6 move
-    // (J5 -90 -> -60, J6 0 -> 30): J6 within ~0.6 deg mean / 3.1 max, and J5 by the
-    // same method within ~0.5 / 2.3 (544/545 used for fitting, 547/548 not).
+    // deg for IMU 283's yaw minus IMU 282's pitch. IMU 283 read a frozen 0,0,0 in
+    // sessions 534-548 and was fixed from 563. In motion (569-669: J5 -90 -> -60,
+    // J6 0 -> 30) KinematicWrist holds J5 within ~0.16 deg mean / ~0.9 max (median
+    // session); its worst spikes come from IMU 283 data gaps of up to ~1.2 s.
+    // KinematicHand gives J5 within ~0.4 / 1.9 and J6 within ~0.7 / 3.1 there
+    // (fitted on 544/545).
     [Header("Joint estimation, J1-J6")]
     public JointAxis[] jointAxes =
     {
