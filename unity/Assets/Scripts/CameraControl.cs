@@ -4,13 +4,14 @@ using UnityEngine.EventSystems;
 using UnityEngine.InputSystem;
 
 /// <summary>
-/// Orbits the camera around the twins while keeping the ENTIRE current bounds
-/// of whatever it's focused on in view, regardless of pose. Rather than
-/// targeting a single fixed point at a fixed distance (which inevitably clips
-/// parts out as the robot's shape changes), this recomputes a bounding volume
-/// across the focused renderers every frame, and derives both the focus point
-/// (its center) and the required camera distance (so the whole volume fits in
-/// the camera's field of view) from that. A/D (or Left/Right) orbit
+/// Orbits the camera around the twins, framing the ENTIRE bounds of whatever
+/// it's focused on. It computes a bounding volume across the focused renderers
+/// and derives both the focus point (its center) and the required camera
+/// distance (so the whole volume fits in the camera's field of view) from that.
+/// By default the bounds are a snapshot, taken at start and whenever a focus
+/// button is pressed, so the camera stays put while the twins move (a framing
+/// that followed them pushed the camera back into the safety cage); turn on
+/// followMovingTwins to recompute them every frame instead. A/D (or Left/Right) orbit
 /// horizontally, W/S (or Up/Down) orbit vertically, the scroll wheel zooms.
 /// Attach to the camera.
 ///
@@ -55,6 +56,11 @@ public class CameraControl : MonoBehaviour
     [Tooltip("Furthest zoom, as a multiple of the distance that fits the whole focus in view.")]
     public float maxZoom = 3f;
 
+    [Tooltip("Off: the camera frames the twins once at start (and when a focus button is pressed) and " +
+             "then stays put while they move, so it can't drift back into the safety cage. " +
+             "On: the framing follows the twins every frame as they move.")]
+    public bool followMovingTwins = false;
+
     private float yaw;
     private float pitch;
     private float currentDistance;
@@ -65,6 +71,7 @@ public class CameraControl : MonoBehaviour
     // Renderers per twin, in twin order (0 = robotRoot). An entry is empty if that root isn't assigned.
     private readonly List<Renderer[]> twinRenderers = new List<Renderer[]>();
     private int focusIndex = -1; // -1 = all twins
+    private Bounds framedBounds;  // what the camera frames; a snapshot unless followMovingTwins
 
     void Start()
     {
@@ -95,22 +102,28 @@ public class CameraControl : MonoBehaviour
         }
 
         Bounds bounds = ComputeFocusBounds();
+        framedBounds = bounds;
         currentCenter = bounds.center;
 
         // Derive starting yaw/pitch/distance from wherever the camera was
-        // placed in the scene, relative to the live bounds center.
+        // placed in the scene, relative to the live bounds center, so the view
+        // starts exactly where the camera sits in the Scene view.
         Vector3 offset = transform.position - bounds.center;
-        currentDistance = Mathf.Max(offset.magnitude, RequiredDistance(bounds));
 
         if (offset.magnitude < 0.01f)
         {
             yaw = 0f;
             pitch = 20f;
+            currentDistance = RequiredDistance(bounds);
         }
         else
         {
             yaw = Mathf.Atan2(offset.x, offset.z) * Mathf.Rad2Deg;
             pitch = Mathf.Clamp(Mathf.Asin(offset.y / offset.magnitude) * Mathf.Rad2Deg, minPitch, maxPitch);
+            currentDistance = offset.magnitude;
+            // Start zoomed to the placed distance; otherwise the camera would glide
+            // to the auto-fit distance. The focus buttons reset this to 1 (auto-fit).
+            zoom = Mathf.Clamp(offset.magnitude / RequiredDistance(bounds), minZoom, maxZoom);
         }
 
         ApplyOrbit(bounds);
@@ -126,6 +139,7 @@ public class CameraControl : MonoBehaviour
         }
         focusIndex = index;
         zoom = 1f; // a focus button always gives the "everything fits" view
+        framedBounds = ComputeFocusBounds(); // re-frame on the twin's current pose
     }
 
     /// <summary>Frame every twin at once. Hook up to the "all twins" button's OnClick.</summary>
@@ -133,6 +147,7 @@ public class CameraControl : MonoBehaviour
     {
         focusIndex = -1;
         zoom = 1f;
+        framedBounds = ComputeFocusBounds();
     }
 
     // LateUpdate so the robot has finished moving/posing this frame before we frame it
@@ -152,7 +167,8 @@ public class CameraControl : MonoBehaviour
         }
 
         HandleZoom();
-        ApplyOrbit(ComputeFocusBounds());
+        if (followMovingTwins) framedBounds = ComputeFocusBounds();
+        ApplyOrbit(framedBounds);
     }
 
     private void HandleZoom()
