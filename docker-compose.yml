@@ -13,6 +13,10 @@
 # DB_NAME, and a Unity WebGL build in deploy/webgl/
 # (see README.md).
 
+# Fixed project name, so container/network names don't depend on what the
+# checkout folder is called ("Digital Twin" here, digital-twin on the lab host)
+name: digitaltwin
+
 services:
   bridges:
     build: ./vt_middleware

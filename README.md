@@ -48,3 +48,21 @@ from Postgres. Viewers only need a browser.
 `docker compose logs -f` shows the bridge and nginx logs; `docker compose down` stops everything.
 After a new WebGL build, just reload the page. After changing the bridge code, run
 `docker compose up -d --build` again.
+
+## Deploying to the lab host
+
+The lab host (`ubuntu@192.168.2.100`) serves the twin at **http://192.168.2.100:8080/**. Port 80
+there is taken by the AMS dashboard. The twin runs as its own compose project (`digitaltwin`)
+next to the lab's AMS containers and Swarm, and doesn't touch them.
+
+From this repo, on a machine with the WebGL build in `deploy/webgl/` and `vt_middleware/.env`:
+
+```bash
+./deploy.sh              # code from GitHub + WebGL build, then rebuild/restart
+./deploy.sh --no-webgl   # bridge-only change
+```
+
+The lab host pulls the code from GitHub, so **push first**. The WebGL build and `.env` aren't in
+git, so the script copies them over ssh (`.env` only on the first deploy, or with `--env`). The
+first run clones the repo into `~/digital-twin` and creates `~/digital-twin/.env` with
+`WEB_PORT=8080`. See `./deploy.sh --help` for the settings.
